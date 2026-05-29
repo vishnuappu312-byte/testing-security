@@ -573,11 +573,35 @@ static esp_err_t dos_start_handler(httpd_req_t *req) {
     uint8_t bssid[6];
     sscanf(bssid_json->valuestring, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx", &bssid[0], &bssid[1], &bssid[2], &bssid[3], &bssid[4], &bssid[5]);
     
-    // Create attack config
+    // Create attack config and persistent AP record for the attack
     attack_config_t attack_config = {0};
     attack_config.target_count = 1;
     attack_config.method = method_json ? method_json->valueint : 0;
-    
+
+    // Allocate persistent wifi_ap_record_t and pointer array on heap so timers/tasks
+    // started by the attack code can safely reference the record after this handler returns.
+    wifi_ap_record_t *ap = malloc(sizeof(wifi_ap_record_t));
+    if (!ap) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Allocation failed");
+        return ESP_FAIL;
+    }
+    memset(ap, 0, sizeof(*ap));
+    memcpy(ap->bssid, bssid, 6);
+    strncpy((char *)ap->ssid, "unknown", sizeof(ap->ssid));
+    ap->primary = 1; // default channel if not provided
+
+    wifi_ap_record_t **ap_ptrs = malloc(sizeof(wifi_ap_record_t *));
+    if (!ap_ptrs) {
+        free(ap);
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Allocation failed");
+        return ESP_FAIL;
+    }
+    ap_ptrs[0] = ap;
+
+    attack_config.ap_records = (const wifi_ap_record_t **)ap_ptrs;
+
     ESP_LOGI(TAG, "Starting DoS attack with method: %d", attack_config.method);
     attack_dos_start(&attack_config);
     
