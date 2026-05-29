@@ -1,11 +1,4 @@
-/**
- * @file attack_method.c
- * @author risinek (risinek@gmail.com), SameerAlSahab (sameeralsahab54@gmail.com)
- * @date 8-5-2026
- * @copyright Copyright (c) 2026
- *
- * @brief Implements common methods for various attacks.
- */
+
 
 #include "attack_method.h"
 #include "attack.h"

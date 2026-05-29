@@ -1,9 +1,3 @@
-/**
- * @file attack_handshake.c
- * @author risinek (risinek@gmail.com), SameerAlSahab (sameeralsahab54@gmail.com)
- * @date 2026
- * @brief Implements handshake attacks with frame validation.
- */
 
 #include "attack_handshake.h"
 

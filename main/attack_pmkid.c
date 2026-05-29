@@ -1,13 +1,4 @@
-/**
- * @file attack_pmkid.c
- * @author risinek (risinek@gmail.com), SameerAlSahab (sameeralsahab54@gmail.com)
- * @date 2021-04-03
- * @copyright Copyright (c) 2021
- * 
- * @brief Implements PMKID attack.
- * 
- * @see PMKID attack reference - https://hashcat.net/forum/thread-7717.html
- */
+
 
 #include "attack_pmkid.h"
 
