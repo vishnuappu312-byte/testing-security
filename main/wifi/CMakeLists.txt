@@ -1,0 +1,40 @@
+idf_component_register(
+    SRCS
+        "../main.c"
+        "../main/attack.c"
+        "../utils/management_helper.c"
+        "../utils/wifi_pass_verifier.c"
+        "../webserver.c"
+        "../wifi_scanner.c"
+        "../attack_deauth.c"
+        "attack_dos.c"
+        "attack_method.c"
+        "attack_handshake.c"
+        "attack_pmkid.c"
+        "attack_probe.c"
+        "attack_deauth_detector.c"
+        "attack_eviltwin.c"
+        "attack_beacon_spam.c"
+        "ap_scanner.c"
+        "frame_analyzer.c"
+        "frame_analyzer_parser.c"
+        "hccapx_serializer.c"
+        "pcap_serializer.c"
+        "sniffer.c"
+        "wifi_controller.c"
+        "wsl_bypasser.c"
+
+    INCLUDE_DIRS
+        "."
+        ".."
+        "../main"
+        "../utils"
+
+    REQUIRES
+        nvs_flash
+        esp_netif
+        esp_event
+        esp_wifi
+        esp_http_server
+        json
+)

@@ -1,15 +1,16 @@
 #ifndef ATTACK_DEAUTH_H
 #define ATTACK_DEAUTH_H
 
-#include <stdint.h>
-#include <stdbool.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 void deauth_attack_init(void);
-void start_deauth_attack(const uint8_t *bssid, int channel);
+void start_deauth_attack(const char *bssid, int channel);
 void stop_deauth_attack(void);
-bool is_attack_active(void);
-void get_attack_target(char *buffer);
 
-#define deauth_init deauth_attack_init
-
+#ifdef __cplusplus
+}
 #endif
+
+#endif // ATTACK_DEAUTH_H
