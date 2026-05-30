@@ -1,11 +1,7 @@
-/**
- * @file attack_dos.c
- * @author risinek (risinek@gmail.com), SameerAlSahab (sameeralsahab54@gmail.com)
- * @date 2021-04-07
- * @copyright Copyright (c) 2021
- *
- * @brief Implements DoS attacks using deauthentication methods
- */
+
+
+
+
 
 #include "attack_dos.h"
 

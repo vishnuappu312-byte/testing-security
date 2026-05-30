@@ -1,6 +1,5 @@
 /**
  * @file attack_handshake.h
- * @author risinek (risinek@gmail.com), SameerAlSahab (sameeralsahab54@gmail.com)
  * @date 2021-04-03
  * @copyright Copyright (c) 2021
  *

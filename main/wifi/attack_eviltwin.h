@@ -1,6 +1,5 @@
 /**
  * @file attack_eviltwin.h
- * @author SameerAlSahab (sameeralsahab54@gmail.com)
  * @brief Provides interface for evil twin attack.
  */
 

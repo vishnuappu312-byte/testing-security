@@ -1,6 +1,5 @@
 /**
  * @file frame_analyzer_parser.c
- * @author risinek (risinek@gmail.com)
  * @date 2021-04-05
  * @copyright Copyright (c) 2021
  * 

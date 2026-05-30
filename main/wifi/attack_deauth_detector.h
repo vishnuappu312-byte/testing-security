@@ -1,9 +1,7 @@
-/**
- * @file attack_deauth_detector.h
- * @author SameerAlSahab (sameeralsahab54@gmail.com)
- * @date 8-5-2026
- * @copyright Copyright (c) 2026
- */
+
+
+
+
 
 #ifndef ATTACK_DEAUTH_DETECTOR_H
 #define ATTACK_DEAUTH_DETECTOR_H

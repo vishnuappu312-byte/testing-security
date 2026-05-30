@@ -1,6 +1,5 @@
 /**
  * @file attack.c
- * @author risinek (risinek@gmail.com), SameerAlSahab (sameeralsahab54@gmail.com)
  * @date 8-5-2026
  * @copyright Copyright (c) 2026
  *

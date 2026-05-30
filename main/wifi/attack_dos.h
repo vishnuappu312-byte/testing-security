@@ -1,11 +1,7 @@
-/**
- * @file attack_dos.h
- * @author risinek (risinek@gmail.com), SameerAlSahab (sameeralsahab54@gmail.com)
- * @date 2021-04-07
- * @copyright Copyright (c) 2021
- * 
- * @brief Provides interface for DoS attack using deauthentication methods
- */
+
+
+
+
 
 #ifndef ATTACK_DOS_H
 #define ATTACK_DOS_H

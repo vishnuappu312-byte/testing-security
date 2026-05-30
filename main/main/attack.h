@@ -1,6 +1,5 @@
 /**
  * @file attack.h
- * @author risinek (risinek@gmail.com)
  * @date 2021-04-02
  * @copyright Copyright (c) 2021
  *

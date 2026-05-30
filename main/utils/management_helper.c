@@ -1,11 +1,4 @@
-/**
- * @file management_helper.h
- * @author Sameer Al Sahab (sameeralsahab54@gmail.com)
- * @date 2026-02-03
- * @copyright Copyright (c) 2026
- *
- * @brief helpers for other utils.
- */
+
 
 
 #include "management_helper.h"

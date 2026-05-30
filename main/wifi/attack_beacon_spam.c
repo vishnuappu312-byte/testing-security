@@ -1,9 +1,4 @@
-/**
- * @file attack_beacon_spam.c
- * @author SameerAlSahab (sameeralsahab54@gmail.com)
- * @date 8-5-2026
- * @copyright Copyright (c) 2026
- */
+
 
 #include "attack_beacon_spam.h"
 #include "wsl_bypasser.h"

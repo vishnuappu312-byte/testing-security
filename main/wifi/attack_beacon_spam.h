@@ -1,11 +1,4 @@
-/**
- * @file attack_beacon_spam.h
- * @author SameerAlSahab (sameeralsahab54@gmail.com)
- * @date 8-5-2026
- * @copyright Copyright (c) 2026
- *
- * @brief Beacon spam attack modes and controls.
- */
+
 
 #ifndef ATTACK_BEACON_SPAM_H
 #define ATTACK_BEACON_SPAM_H

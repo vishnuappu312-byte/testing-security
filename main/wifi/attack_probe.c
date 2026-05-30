@@ -1,6 +1,5 @@
 /**
  * @file attack_probe.c
- * @author SameerAlSahab (sameeralsahab54@gmail.com)
  * @brief Sniff Probe Requests and create beacons of their ssid
  */
 

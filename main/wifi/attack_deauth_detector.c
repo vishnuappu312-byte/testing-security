@@ -1,13 +1,6 @@
-/**
- * @file attack_deauth_detector.c
- * @author SameerAlSahab (sameeralsahab54@gmail.com)
- * @date 8-5-2026
- * @copyright Copyright (c) 2026
- *
- * @brief 802.11 Deauthentication & Disassociation frame detector for ESP32.
- * IMPORTANT: Monitors management frames in promiscuous mode to identify
- * potential DoS attacks targeting specific BSSIDs.
- */
+
+
+
 
 #include "attack_deauth_detector.h"
 #include <string.h>

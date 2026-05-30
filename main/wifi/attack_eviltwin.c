@@ -1,10 +1,3 @@
-/**
- * @file attack_eviltwin.c
- * @author SameerAlSahab (sameeralsahab54@gmail.com)
- * @date 8-5-2026
- * @copyright Copyright (c) 2026
- * @brief Captures WiFi passwords via fake update page with DNS redirection and deauth.
- */
 
 #include "attack_method.h"
 #include "attack.h"

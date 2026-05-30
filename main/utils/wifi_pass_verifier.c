@@ -1,9 +1,3 @@
-/**
- * @file wifi_pass_verifier.c
- * @author SameerAlSahab (sameeralsahab54@gmail.com)
- * @date 8-5-2026
- * @copyright Copyright (c) 2026
- */
 
 #include "wifi_pass_verifier.h"
 
