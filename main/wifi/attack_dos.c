@@ -5,6 +5,8 @@
 
 #include "attack_dos.h"
 
+#include <stdbool.h>
+
 #define LOG_LOCAL_LEVEL ESP_LOG_VERBOSE
 #include "esp_log.h"
 #include "esp_err.h"
@@ -16,10 +18,17 @@
 
 static const char *TAG = "main:attack_dos";
 static attack_dos_methods_t method = -1;
+static bool is_running = false;
 
 void attack_dos_start(attack_config_t *attack_config) {
+    if (attack_config == NULL || attack_config->target_count == 0 || attack_config->ap_records[0] == NULL) {
+        ESP_LOGE(TAG, "DoS start failed: missing target AP record");
+        return;
+    }
+
     ESP_LOGI(TAG, "Starting DoS attack on %d targets...", attack_config->target_count);
     method = attack_config->method;
+    is_running = true;
 
     switch (method) {
         case ATTACK_DOS_METHOD_BROADCAST:
@@ -53,6 +62,10 @@ void attack_dos_start(attack_config_t *attack_config) {
 }
 
 void attack_dos_stop() {
+    if (!is_running) {
+        return;
+    }
+
     switch(method){
         case ATTACK_DOS_METHOD_ROGUE_AP:
             wifictl_mgmt_ap_start();
@@ -74,5 +87,7 @@ void attack_dos_stop() {
         default:
             ESP_LOGE(TAG, "Unknown attack method! Attack may not be stopped properly.");
     }
+    is_running = false;
+    method = -1;
     ESP_LOGI(TAG, "DoS attack stopped");
 }

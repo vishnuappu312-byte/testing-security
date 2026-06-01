@@ -177,14 +177,24 @@ static void attack_request_handler(void *args, esp_event_base_t event_base, int3
 
 
 static void attack_reset_handler(void *args, esp_event_base_t event_base, int32_t event_id, void *event_data) {
-    if(attack_status.content){
+    attack_pmkid_stop();
+    attack_handshake_stop();
+    attack_dos_stop();
+    attack_beacon_spam_stop();
+    attack_probe_stop();
+    attack_method_evil_twin_stop();
+    attack_method_super_clone_stop();
+    wifictl_mgmt_ap_start();
+    wifictl_restore_ap_mac();
+
+    if (attack_status.content) {
         free(attack_status.content);
         attack_status.content = NULL;
     }
     attack_status.content_size = 0;
     attack_status.type = -1;
     attack_status.state = READY;
-    ESP_LOGD(TAG, "Attack timeout cleared");
+    ESP_LOGD(TAG, "Attack reset completed");
 }
 
 void attack_init(){

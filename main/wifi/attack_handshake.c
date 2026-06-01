@@ -38,6 +38,7 @@ static uint8_t captured_eapol_frames = 0;
 
 static TaskHandle_t monitor_task_handle = NULL;
 static bool is_running = false;
+static bool event_handler_registered = false;
 
 #define MIN_EAPOL_REQUIRED 4
 
@@ -100,6 +101,16 @@ void attack_handshake_monitor_task(void *arg)
 
 
 void attack_handshake_start(attack_config_t *attack_config){
+    if (attack_config == NULL || attack_config->target_count == 0 || attack_config->ap_records[0] == NULL) {
+        ESP_LOGE(TAG, "Handshake start failed: missing target AP record");
+        return;
+    }
+
+    if (is_running) {
+        ESP_LOGW(TAG, "Handshake already running, stopping previous run first.");
+        attack_handshake_stop();
+    }
+
     ESP_LOGI(TAG, "Starting handshake attack...");
     captured_eapol_frames = 0;
     method = attack_config->method;
@@ -114,7 +125,17 @@ void attack_handshake_start(attack_config_t *attack_config){
     wifictl_sniffer_filter_frame_types(true, false, false);
     wifictl_sniffer_start(ap_record->primary);
     frame_analyzer_capture_start(SEARCH_HANDSHAKE, ap_record->bssid);
-    ESP_ERROR_CHECK(esp_event_handler_register(FRAME_ANALYZER_EVENTS, DATA_FRAME_EVENT_EAPOLKEY_FRAME, &eapolkey_frame_handler, NULL));
+    esp_err_t err = esp_event_handler_register(FRAME_ANALYZER_EVENTS, DATA_FRAME_EVENT_EAPOLKEY_FRAME, &eapolkey_frame_handler, NULL);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "EAPOL event handler register failed: %s", esp_err_to_name(err));
+        wifictl_sniffer_stop();
+        frame_analyzer_capture_stop();
+        is_running = false;
+        ap_record = NULL;
+        method = -1;
+        return;
+    }
+    event_handler_registered = true;
 
     switch(attack_config->method){
         case ATTACK_HANDSHAKE_METHOD_BROADCAST:
@@ -139,27 +160,38 @@ void attack_handshake_start(attack_config_t *attack_config){
 }
 
 void attack_handshake_stop(){
-    if (!is_running) return;
+    if (!is_running && !event_handler_registered) return;
 
+    bool was_running = is_running;
     is_running = false;
 
-    switch(method){
-        case ATTACK_HANDSHAKE_METHOD_BROADCAST:
-            attack_method_broadcast_stop();
-            break;
-        case ATTACK_HANDSHAKE_METHOD_ROGUE_AP:
-            wifictl_mgmt_ap_start();
-            wifictl_restore_ap_mac();
-            break;
-        case ATTACK_HANDSHAKE_METHOD_PASSIVE:
-            break;
-        default:
-            ESP_LOGE(TAG, "Unknown attack method! Attack may not be stopped properly.");
+    if (was_running) {
+        switch(method){
+            case ATTACK_HANDSHAKE_METHOD_BROADCAST:
+                attack_method_broadcast_stop();
+                break;
+            case ATTACK_HANDSHAKE_METHOD_ROGUE_AP:
+                wifictl_mgmt_ap_start();
+                wifictl_restore_ap_mac();
+                break;
+            case ATTACK_HANDSHAKE_METHOD_PASSIVE:
+                break;
+            default:
+                ESP_LOGE(TAG, "Unknown attack method! Attack may not be stopped properly.");
+        }
+
+        wifictl_sniffer_stop();
+        frame_analyzer_capture_stop();
     }
 
-    wifictl_sniffer_stop();
-    frame_analyzer_capture_stop();
-    ESP_ERROR_CHECK(esp_event_handler_unregister(ESP_EVENT_ANY_BASE, ESP_EVENT_ANY_ID, &eapolkey_frame_handler));
+    if (event_handler_registered) {
+        esp_err_t err = esp_event_handler_unregister(FRAME_ANALYZER_EVENTS, DATA_FRAME_EVENT_EAPOLKEY_FRAME, &eapolkey_frame_handler);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "EAPOL event handler unregister failed: %s", esp_err_to_name(err));
+        } else {
+            event_handler_registered = false;
+        }
+    }
 
     ap_record = NULL;
     method = -1;

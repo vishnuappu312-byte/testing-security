@@ -49,7 +49,12 @@ static void frame_handler(void *buf, wifi_promiscuous_pkt_type_t type) {
             return;
     }
 
-    ESP_ERROR_CHECK(esp_event_post(SNIFFER_EVENTS, event_id, frame, frame->rx_ctrl.sig_len + sizeof(wifi_promiscuous_pkt_t), portMAX_DELAY));
+    esp_err_t err = esp_event_post(SNIFFER_EVENTS, event_id, frame,
+                                  frame->rx_ctrl.sig_len + sizeof(wifi_promiscuous_pkt_t),
+                                  portMAX_DELAY);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "sniffer event post failed: %s", esp_err_to_name(err));
+    }
 }
 
 /**
@@ -73,7 +78,10 @@ void wifictl_sniffer_start(uint8_t channel) {
     ESP_LOGI(TAG, "Starting promiscuous mode...");
     // ESP32 cannot switch port, if there is some STA connected to AP
     ESP_LOGD(TAG, "Kicking all connected STAs from AP");
-    ESP_ERROR_CHECK(esp_wifi_deauth_sta(0));
+    esp_err_t err = esp_wifi_deauth_sta(0);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "deauth STA failed (continuing): %s", esp_err_to_name(err));
+    }
     esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
     esp_wifi_set_promiscuous(true);
     esp_wifi_set_promiscuous_rx_cb(&frame_handler);

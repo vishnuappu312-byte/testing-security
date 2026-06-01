@@ -26,8 +26,19 @@ void wifictl_scan_nearby_aps(){
         .scan_type = WIFI_SCAN_TYPE_ACTIVE
     };
     
-    ESP_ERROR_CHECK(esp_wifi_scan_start(&scan_config, true));
-    ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&ap_records.count, ap_records.records));
+    esp_err_t err = esp_wifi_scan_start(&scan_config, true);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Scan start failed: %s", esp_err_to_name(err));
+        ap_records.count = 0;
+        return;
+    }
+
+    err = esp_wifi_scan_get_ap_records(&ap_records.count, ap_records.records);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Scan result read failed: %s", esp_err_to_name(err));
+        ap_records.count = 0;
+        return;
+    }
     ESP_LOGI(TAG, "Found %u APs.", ap_records.count);
     ESP_LOGD(TAG, "Scan done.");
 }
@@ -37,7 +48,7 @@ const wifictl_ap_records_t *wifictl_get_ap_records() {
 }
 
 const wifi_ap_record_t *wifictl_get_ap_record(unsigned index) {
-    if(index > ap_records.count){
+    if(index >= ap_records.count){
         ESP_LOGE(TAG, "Index out of bounds! %u records available, but %u requested", ap_records.count, index);
         return NULL;
     }

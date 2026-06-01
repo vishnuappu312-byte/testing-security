@@ -14,6 +14,7 @@
 #include "wifi/ap_scanner.h"
 #include "wifi/sniffer.h"
 
+#include "esp_err.h"
 #include "esp_wifi_types.h"
 
 /**
@@ -87,6 +88,35 @@ void wifictl_set_channel(uint8_t channel);
  * @brief Stops the management AP and resets the radio mode.
  */
 void wifictl_mgmt_ap_stop();
+
+/**
+ * @brief Reads the current management AP SSID/password (from NVS if set, otherwise defaults).
+ *
+ * @param ssid Output buffer for SSID
+ * @param ssid_size Size of ssid buffer
+ * @param pass Output buffer for password (may be empty for open auth)
+ * @param pass_size Size of pass buffer
+ *
+ * @return ESP_OK on success
+ */
+esp_err_t wifictl_mgmt_ap_get_creds(char *ssid, size_t ssid_size, char *pass, size_t pass_size);
+
+/**
+ * @brief Stores management AP SSID/password to NVS (takes effect after restart of management AP).
+ *
+ * @param ssid SSID (1..32 chars)
+ * @param pass Password ("" for open, or 8..63 chars for WPA2-PSK)
+ *
+ * @return ESP_OK on success
+ */
+esp_err_t wifictl_mgmt_ap_set_creds(const char *ssid, const char *pass);
+
+/**
+ * @brief Clears stored management AP credentials from NVS (reverts to defaults).
+ *
+ * @return ESP_OK on success
+ */
+esp_err_t wifictl_mgmt_ap_clear_creds(void);
 
 
 

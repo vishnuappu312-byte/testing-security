@@ -1,0 +1,49 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "main/attack.c"
+        "utils/management_helper.c"
+        "utils/wifi_pass_verifier.c"
+        "webserver.c"
+        "wifi_scanner.c"
+        "attack_deauth.c"
+        "wifi/attack_dos.c"
+        "wifi/attack_method.c"
+        "wifi/attack_handshake.c"
+        "wifi/attack_pmkid.c"
+        "wifi/attack_probe.c"
+        "wifi/attack_deauth_detector.c"
+        "wifi/attack_eviltwin.c"
+        "wifi/attack_beacon_spam.c"
+        "wifi/ap_scanner.c"
+        "wifi/frame_analyzer.c"
+        "wifi/frame_analyzer_parser.c"
+        "wifi/hccapx_serializer.c"
+        "wifi/pcap_serializer.c"
+        "wifi/sniffer.c"
+        "wifi/wifi_controller.c"
+        "wifi/wsl_bypasser.c"
+        "bt/attack_bt_spam.c"
+        "bt/ble_scan.c"
+        "bt/ble_spoof.c"
+        "bt/ble_connect_flood.c"
+        "bt/ble_l2cap_flood.c"
+        "bt/ble_gatt_probe.c"
+        "bt/ble_common.c"
+
+    INCLUDE_DIRS
+        "."
+        "main"
+        "utils"
+        "wifi"
+        "bt"
+
+    REQUIRES
+        nvs_flash
+        esp_netif
+        esp_event
+        esp_wifi
+        esp_http_server
+        json
+        bt
+)

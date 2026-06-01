@@ -1,9 +1,7 @@
 #pragma once
 /**
-
  * @file wifi_pass_verifier.h
-/**
-
+ *
  * Usage :
  *
  *   #include "wifi_verify.h"
@@ -24,11 +22,11 @@
 
 #ifdef __cplusplus
 extern "C" {
-    #endif
+#endif
 
-    #include <stdint.h>
-    #include <stdbool.h>
-    #include "esp_netif.h"
+#include <stdint.h>
+#include <stdbool.h>
+#include "esp_netif.h"
 
 
     typedef enum {

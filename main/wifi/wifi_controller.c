@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdbool.h>
 
 #ifndef CONFIG_MGMT_AP_SSID
 #define CONFIG_MGMT_AP_SSID "OmegaSolutions"
@@ -149,7 +150,7 @@ void wifictl_set_channel(uint8_t channel){
     esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
 }
 
-void wifictl_get_mgmt_creds(char* ssid, char* pass) {
+static void wifictl_get_mgmt_creds_unsafe(char* ssid, char* pass) {
     nvs_handle_t nvs_h;
     esp_err_t err = nvs_open("storage", NVS_READONLY, &nvs_h);
     if (err == ESP_OK) {
@@ -167,13 +168,80 @@ void wifictl_get_mgmt_creds(char* ssid, char* pass) {
     }
 }
 
+esp_err_t wifictl_mgmt_ap_get_creds(char *ssid, size_t ssid_size, char *pass, size_t pass_size) {
+    if (ssid == NULL || pass == NULL || ssid_size == 0 || pass_size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char tmp_ssid[32] = {0};
+    char tmp_pass[64] = {0};
+    wifictl_get_mgmt_creds_unsafe(tmp_ssid, tmp_pass);
+
+    snprintf(ssid, ssid_size, "%s", tmp_ssid);
+    snprintf(pass, pass_size, "%s", tmp_pass);
+    return ESP_OK;
+}
+
+static bool mgmt_ap_creds_valid(const char *ssid, const char *pass) {
+    if (ssid == NULL || pass == NULL) {
+        return false;
+    }
+    size_t ssid_len = strlen(ssid);
+    size_t pass_len = strlen(pass);
+
+    if (ssid_len == 0 || ssid_len > 32) {
+        return false;
+    }
+
+    if (pass_len == 0) {
+        return true; // open auth
+    }
+    return (pass_len >= 8 && pass_len <= 63);
+}
+
+esp_err_t wifictl_mgmt_ap_set_creds(const char *ssid, const char *pass) {
+    if (!mgmt_ap_creds_valid(ssid, pass)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    nvs_handle_t nvs_h;
+    esp_err_t err = nvs_open("storage", NVS_READWRITE, &nvs_h);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = nvs_set_str(nvs_h, "ap_ssid", ssid);
+    if (err == ESP_OK) {
+        err = nvs_set_str(nvs_h, "ap_pass", pass);
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(nvs_h);
+    }
+    nvs_close(nvs_h);
+    return err;
+}
+
+esp_err_t wifictl_mgmt_ap_clear_creds(void) {
+    nvs_handle_t nvs_h;
+    esp_err_t err = nvs_open("storage", NVS_READWRITE, &nvs_h);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    (void)nvs_erase_key(nvs_h, "ap_ssid");
+    (void)nvs_erase_key(nvs_h, "ap_pass");
+    err = nvs_commit(nvs_h);
+    nvs_close(nvs_h);
+    return err;
+}
+
 
 void wifictl_mgmt_ap_start() {
     esp_wifi_set_mode(WIFI_MODE_APSTA);
 
     char current_ssid[32] = {0};
     char current_pass[64] = {0};
-    wifictl_get_mgmt_creds(current_ssid, current_pass);
+    wifictl_get_mgmt_creds_unsafe(current_ssid, current_pass);
 
     wifi_config_t mgmt_wifi_config = {
         .ap = {

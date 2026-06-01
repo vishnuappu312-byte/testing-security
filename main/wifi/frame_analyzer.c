@@ -7,7 +7,9 @@
  */
 #include "frame_analyzer.h"
 
+#include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define LOG_LOCAL_LEVEL ESP_LOG_DEBUG
@@ -21,6 +23,15 @@
 static const char *TAG = "frame_analyzer";
 static uint8_t target_bssid[6];
 static search_type_t search_type = -1;
+static bool data_handler_registered = false;
+
+static void free_pmkid_items(pmkid_item_t *pmkid_item) {
+    while (pmkid_item != NULL) {
+        pmkid_item_t *next = pmkid_item->next;
+        free(pmkid_item);
+        pmkid_item = next;
+    }
+}
 
 
 /**
@@ -94,7 +105,11 @@ static void data_frame_handler(void *args, esp_event_base_t event_base, int32_t 
         if((pmkid_items = parse_pmkid(eapol_key_packet)) == NULL){
             return;
         }
-        ESP_ERROR_CHECK(esp_event_post(FRAME_ANALYZER_EVENTS, DATA_FRAME_EVENT_PMKID, &pmkid_items, sizeof(pmkid_item_t *), portMAX_DELAY));
+        esp_err_t err = esp_event_post(FRAME_ANALYZER_EVENTS, DATA_FRAME_EVENT_PMKID, &pmkid_items, sizeof(pmkid_item_t *), portMAX_DELAY);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "PMKID event post failed: %s", esp_err_to_name(err));
+            free_pmkid_items(pmkid_items);
+        }
         return;
     }
 }
@@ -103,9 +118,30 @@ void frame_analyzer_capture_start(search_type_t search_type_arg, const uint8_t *
     ESP_LOGI(TAG, "Frame analysis started...");
     search_type = search_type_arg;
     memcpy(&target_bssid, bssid, 6);
-    ESP_ERROR_CHECK(esp_event_handler_register(SNIFFER_EVENTS, SNIFFER_EVENT_CAPTURED_DATA, &data_frame_handler, NULL));
+
+    if (data_handler_registered) {
+        return;
+    }
+
+    esp_err_t err = esp_event_handler_register(SNIFFER_EVENTS, SNIFFER_EVENT_CAPTURED_DATA, &data_frame_handler, NULL);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Frame analyzer handler register failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    data_handler_registered = true;
 }
 
 void frame_analyzer_capture_stop(){
-    ESP_ERROR_CHECK(esp_event_handler_unregister(ESP_EVENT_ANY_BASE, ESP_EVENT_ANY_ID, &data_frame_handler));
+    if (!data_handler_registered) {
+        return;
+    }
+
+    esp_err_t err = esp_event_handler_unregister(SNIFFER_EVENTS, SNIFFER_EVENT_CAPTURED_DATA, &data_frame_handler);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Frame analyzer handler unregister failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    data_handler_registered = false;
 }

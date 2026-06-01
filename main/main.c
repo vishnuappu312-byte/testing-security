@@ -9,6 +9,7 @@
 #include "nvs_flash.h"
 #include "webserver.h"
 #include "wifi_scanner.h"
+#include "wifi_controller.h"
 #include "attack_deauth.h"
 #include "attack_deauth_detector.h"
 #include "attack_beacon_spam.h"
@@ -17,42 +18,15 @@
 #include "attack_pmkid.h"
 #include "attack_probe.h"
 #include "attack_eviltwin.h"
+#include "attack.h"
+#include "bt/attack_bt_spam.h"
+#include "bt/ble_scan.h"
+#include "bt/ble_spoof.h"
+#include "bt/ble_connect_flood.h"
+#include "bt/ble_l2cap_flood.h"
+#include "bt/ble_gatt_probe.h"
 
 static const char *TAG = "MAIN";
-
-#define WEB_SSID "Omega_Solutions"
-#define WEB_PASS "hacktheplanet"
-
-void wifi_init_ap_sta(void) {
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-    
-    esp_netif_create_default_wifi_ap();
-    esp_netif_create_default_wifi_sta();
-    
-    wifi_config_t ap_config = {
-        .ap = {
-            .ssid = WEB_SSID,
-            .ssid_len = strlen(WEB_SSID),
-            .password = WEB_PASS,
-            .max_connection = 5,
-            .authmode = WIFI_AUTH_WPA_WPA2_PSK,
-            .channel = 6
-        },
-    };
-    
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
-    ESP_ERROR_CHECK(esp_wifi_start());
-    
-    ESP_LOGI(TAG, "==========================================");
-    ESP_LOGI(TAG, "Omega Solutions - Complete Security Suite");
-    ESP_LOGI(TAG, "AP SSID: %s", WEB_SSID);
-    ESP_LOGI(TAG, "Password: %s", WEB_PASS);
-    ESP_LOGI(TAG, "Web: http://192.168.4.1");
-    ESP_LOGI(TAG, "Login: omega / solutions123");
-    ESP_LOGI(TAG, "==========================================");
-}
 
 void app_main(void) {
     esp_err_t ret = nvs_flash_init();
@@ -62,15 +36,26 @@ void app_main(void) {
     }
     ESP_ERROR_CHECK(ret);
     
-    ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     
-    wifi_init_ap_sta();
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    wifictl_mgmt_ap_start();
+    char ssid[33] = {0};
+    char pass[64] = {0};
+    if (wifictl_mgmt_ap_get_creds(ssid, sizeof(ssid), pass, sizeof(pass)) == ESP_OK) {
+        ESP_LOGI(TAG, "Management AP SSID: %s", ssid);
+    }
     
     scanner_init();
     deauth_attack_init();
     deauth_detector_start();
+    attack_init();
+    attack_bt_spam_init();
+    /* Initialize new BLE modules */
+    ble_scan_init();
+    ble_spoof_init();
+    ble_connect_flood_init();
+    ble_l2cap_flood_init();
+    ble_gatt_probe_init();
     start_web_server();
     
     ESP_LOGI(TAG, "=========================================");
@@ -84,8 +69,7 @@ void app_main(void) {
     ESP_LOGI(TAG, "👻 Probe Sniffer (Ghost AP creator)");
     ESP_LOGI(TAG, "🎭 Evil Twin (Captive portal password capture)");
     ESP_LOGI(TAG, "=========================================");
-    ESP_LOGI(TAG, "📱 Connect to WiFi: %s", WEB_SSID);
-    ESP_LOGI(TAG, "🔑 Password: %s", WEB_PASS);
+    ESP_LOGI(TAG, "📱 Connect to WiFi: (management AP SSID shown above)");
     ESP_LOGI(TAG, "🌐 Open browser: http://192.168.4.1");
     ESP_LOGI(TAG, "🔐 Username: omega | Password: solutions123");
     ESP_LOGI(TAG, "=========================================");
