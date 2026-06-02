@@ -124,6 +124,35 @@ bool ble_common_is_initialized(void) {
     return nimble_initialized;
 }
 
+/* ---- Disconnect all active BLE connections ---- */
+
+void ble_common_disconnect_all(void) {
+    int rc;
+    int count = 0;
+
+    for (uint16_t conn_handle = 0; conn_handle < 4; conn_handle++) {
+        rc = ble_gap_conn_find(conn_handle, NULL);
+        if (rc == 0) {
+            /* Connection exists — terminate it */
+            rc = ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+            if (rc == 0) {
+                ESP_LOGI(TAG, "Terminated conn_handle=%u", conn_handle);
+                count++;
+            } else {
+                ESP_LOGW(TAG, "Failed to terminate conn_handle=%u, rc=%d", conn_handle, rc);
+            }
+        }
+    }
+
+    if (count > 0) {
+        ESP_LOGI(TAG, "Disconnected %d BLE connection(s), waiting 1s...", count);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    } else {
+        ESP_LOGI(TAG, "No active BLE connections to disconnect");
+    }
+}
+
+
 /* ---- Existing helpers (unchanged) ---- */
 
 uint8_t ble_common_own_addr_type(void) {

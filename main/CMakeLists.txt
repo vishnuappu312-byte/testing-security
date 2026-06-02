@@ -30,6 +30,7 @@ idf_component_register(
         "bt/ble_l2cap_flood.c"
         "bt/ble_gatt_probe.c"
         "bt/ble_common.c"
+        "bt/ble_deauth.c"
 
     INCLUDE_DIRS
         "."

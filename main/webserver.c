@@ -25,6 +25,7 @@
 #include "bt/ble_connect_flood.h"
 #include "bt/ble_l2cap_flood.h"
 #include "bt/ble_gatt_probe.h"
+#include "bt/ble_deauth.h"
 #include "attack.h"
 #include "web_ui.h"
 
@@ -268,245 +269,6 @@ static void get_attack_target(char *target) {
     memcpy(target, status->content, len);
     target[len] = '\0';
 }
-
-#if 0
-// Legacy UI retained only as a reference. The active UI is in web_ui.h.
-// Login Page
-const char* login_html = 
-"<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>"
-"<title>Omega Solutions - Login</title><style>"
-"*{margin:0;padding:0;box-sizing:border-box;}body{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;"
-"background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);min-height:100vh;display:flex;justify-content:center;align-items:center;}"
-".login-container{background:rgba(255,255,255,0.95);border-radius:20px;padding:40px;box-shadow:0 20px 60px rgba(0,0,0,0.3);"
-"width:90%;max-width:400px;text-align:center;}.logo{font-size:48px;margin-bottom:20px;}h1{color:#333;margin-bottom:10px;}"
-".subtitle{color:#666;margin-bottom:30px;}input{width:100%;padding:15px;margin:10px 0;border:2px solid #ddd;border-radius:10px;font-size:16px;}"
-"input:focus{outline:none;border-color:#667eea;}button{width:100%;padding:15px;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);"
-"color:white;border:none;border-radius:10px;font-size:16px;cursor:pointer;}</style></head><body>"
-"<div class='login-container'><div class='logo'>🔒</div><h1>Omega Solutions</h1><div class='subtitle'>Security Testing Platform</div>"
-"<form method='POST' action='/login'>"
-"<input type='text' name='username' placeholder='Username' required>"
-"<input type='password' name='password' placeholder='Password' required>"
-"<button type='submit'>Login</button>"
-"</form></div></body></html>";
-
-// Dashboard HTML (same as your working version)
-const char* dashboard_html = 
-"<!DOCTYPE html><html data-theme='dark'><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0, user-scalable=yes'>"
-"<title>Omega Solutions - Complete Security Suite</title><style>"
-":root{--bg-primary:#0a0e27;--bg-secondary:#16213e;--text-primary:#ffffff;--text-secondary:#a0a0a0;"
-"--card-bg:rgba(255,255,255,0.08);--border-color:rgba(255,255,255,0.1);"
-"--gradient-1:linear-gradient(135deg,#667eea 0%,#764ba2 100%);"
-"--gradient-2:linear-gradient(135deg,#f093fb 0%,#f5576c 100%);"
-"--gradient-3:linear-gradient(135deg,#4facfe 0%,#00f2fe 100%);"
-"--gradient-4:linear-gradient(135deg,#43e97b 0%,#38f9d7 100%);"
-"--danger:#ff4757;--success:#00d25b;--warning:#ffb400;}"
-"[data-theme='light']{--bg-primary:#f0f2f5;--bg-secondary:#ffffff;--text-primary:#1a1a2e;--text-secondary:#666666;--card-bg:#ffffff;--border-color:#e0e0e0;}"
-"*{margin:0;padding:0;box-sizing:border-box;}"
-"body{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;background:var(--bg-primary);color:var(--text-primary);padding:15px;min-height:100vh;}"
-".container{max-width:1400px;margin:0 auto;}"
-".header{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;padding:15px 20px;background:var(--bg-secondary);border-radius:15px;}"
-".logo-section{display:flex;align-items:center;gap:15px;}.logo{font-size:32px;}"
-".title h1{font-size:20px;background:var(--gradient-1);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}"
-".subtitle{font-size:11px;color:var(--text-secondary);}"
-".theme-toggle{background:var(--card-bg);border:1px solid var(--border-color);padding:8px 15px;border-radius:20px;cursor:pointer;margin-left:10px;}"
-".icon-menu{display:flex;justify-content:center;gap:20px;margin-bottom:25px;padding:15px;background:var(--bg-secondary);border-radius:15px;flex-wrap:wrap;}"
-".icon-item{text-align:center;cursor:pointer;padding:10px 20px;border-radius:12px;transition:all 0.3s ease;}"
-".icon-item:hover{transform:translateY(-5px);background:var(--card-bg);}"
-".icon-item.active{background:var(--gradient-1);}"
-".icon-large{font-size:32px;display:block;margin-bottom:8px;}"
-".icon-label{font-size:11px;font-weight:bold;}"
-".attacks-container{display:none;margin-bottom:20px;}"
-".attacks-container.active{display:block;}"
-".attack-buttons{display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;}"
-".attack-card{background:var(--card-bg);border:1px solid var(--border-color);border-radius:10px;padding:10px 15px;cursor:pointer;transition:all 0.3s ease;text-align:center;flex:1;min-width:90px;}"
-".attack-card:hover{transform:translateY(-3px);background:var(--gradient-2);}"
-".attack-card.selected{background:var(--gradient-1);border-color:transparent;}"
-".attack-name{font-size:13px;font-weight:bold;}"
-".attack-status{font-size:9px;margin-top:5px;color:var(--text-secondary);}"
-".grid{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px;}"
-".card{background:var(--card-bg);border-radius:15px;padding:20px;border:1px solid var(--border-color);}"
-".card h2{font-size:18px;margin-bottom:15px;background:var(--gradient-3);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}"
-".scan-controls{display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap;}"
-".btn{background:var(--gradient-4);color:#000;border:none;padding:10px 20px;border-radius:8px;cursor:pointer;font-weight:bold;}"
-".btn:hover{transform:translateY(-2px);}"
-".btn-danger{background:var(--danger);color:#fff;}"
-".btn-stop{background:var(--gradient-2);color:#fff;}"
-".btn-warning{background:var(--warning);color:#000;}"
-".dos-options, .handshake-options{display:flex;gap:10px;margin:10px 0;flex-wrap:wrap;}"
-".dos-btn, .handshake-btn{padding:8px 15px;background:var(--card-bg);border:1px solid var(--border-color);border-radius:8px;cursor:pointer;}"
-".dos-btn.active, .handshake-btn.active{background:var(--gradient-1);}"
-".time-input-area{display:flex;gap:10px;margin:15px 0;align-items:center;flex-wrap:wrap;}"
-".time-input{background:var(--bg-secondary);border:1px solid var(--border-color);color:var(--text-primary);padding:10px;border-radius:8px;width:100px;text-align:center;}"
-".attack-panel{background:rgba(255,71,87,0.1);border:1px solid var(--danger);border-radius:10px;padding:15px;margin-top:15px;}"
-".beacon-config, .dos-config, .handshake-config{background:rgba(0,210,91,0.1);border:1px solid var(--success);border-radius:10px;padding:15px;margin-top:15px;}"
-".status{padding:12px;margin:15px 0;border-radius:10px;text-align:center;font-weight:bold;}"
-".status.idle{background:rgba(0,210,91,0.2);border:1px solid var(--success);color:var(--success);}"
-".status.attacking{background:rgba(255,71,87,0.2);border:1px solid var(--danger);color:var(--danger);animation:pulse 1s infinite;}"
-".log-area{background:#000;color:#00ff00;padding:15px;height:250px;overflow-y:scroll;font-family:'Courier New',monospace;font-size:11px;border-radius:10px;}"
-".log-entry{margin:3px 0;padding:3px 5px;border-left:3px solid var(--success);}"
-".log-entry.attack{border-left-color:var(--danger);color:#ff6b6b;}"
-".log-entry.warning{border-left-color:var(--warning);color:#ffd93d;}"
-".log-entry.success{border-left-color:var(--success);color:#6bcb77;}"
-"table{width:100%;border-collapse:collapse;margin-top:10px;font-size:12px;}"
-"th,td{padding:8px;text-align:left;border-bottom:1px solid var(--border-color);}"
-"th{background:var(--gradient-1);color:#fff;}"
-"tr:hover{background:rgba(255,255,255,0.05);}"
-".select-btn{background:var(--gradient-3);color:#fff;border:none;padding:5px 10px;border-radius:5px;cursor:pointer;font-size:11px;}"
-".selected-network{background:var(--gradient-3);padding:10px;border-radius:8px;margin:10px 0;text-align:center;font-size:13px;}"
-"@keyframes pulse{0%{opacity:1;}50%{opacity:0.6;}100%{opacity:1;}}"
-"@media(max-width:768px){.grid{grid-template-columns:1fr;}.icon-large{font-size:24px;}}"
-"</style>"
-"<script>"
-"let selectedNetwork = null;"
-"let selectedAttack = 'deauth';"
-"let selectedModule = 'wifi';"
-"let customTime = 2;"
-"let dosMethod = 0;"
-"let handshakeMethod = 0;"
-""
-"function toggleTheme(){var e=document.documentElement,t=e.getAttribute('data-theme')==='dark'?'light':'dark';e.setAttribute('data-theme',t);localStorage.setItem('theme',t);}"
-"function logout(){window.location.href='/logout';}"
-""
-"function addLog(msg,type){"
-"var logDiv=document.getElementById('logArea');"
-"var entry=document.createElement('div');"
-"entry.className='log-entry '+(type||'info');"
-"entry.innerHTML='['+new Date().toLocaleTimeString()+'] '+msg;"
-"logDiv.appendChild(entry);"
-"logDiv.scrollTop=logDiv.scrollHeight;"
-"}"
-""
-"function selectModule(module){"
-"selectedModule=module;"
-"document.querySelectorAll('.icon-item').forEach(el=>el.classList.remove('active'));"
-"document.getElementById('icon-'+module).classList.add('active');"
-"document.querySelectorAll('.attacks-container').forEach(el=>el.classList.remove('active'));"
-"document.getElementById(module+'-attacks').classList.add('active');"
-"addLog('Selected '+module.toUpperCase()+' module','info');"
-"}"
-""
-"function selectAttack(attack){"
-"selectedAttack=attack;"
-"document.querySelectorAll('.attack-card').forEach(el=>el.classList.remove('selected'));"
-"document.getElementById('attack-'+attack).classList.add('selected');"
-"document.querySelectorAll('.attack-panel, .beacon-config, .dos-config, .handshake-config').forEach(el=>el.style.display='none');"
-"if(attack==='deauth') document.getElementById('deauthPanel').style.display='block';"
-"else if(attack==='beacon') document.getElementById('beaconPanel').style.display='block';"
-"else if(attack==='dos') document.getElementById('dosPanel').style.display='block';"
-"else if(attack==='handshake') document.getElementById('handshakePanel').style.display='block';"
-"else if(attack==='pmkid') document.getElementById('pmkidPanel').style.display='block';"
-"else if(attack==='probe') document.getElementById('probePanel').style.display='block';"
-"else if(attack==='eviltwin') document.getElementById('eviltwinPanel').style.display='block';"
-"addLog('Selected attack: '+attack.toUpperCase(),'info');"
-"}"
-""
-"function updateCustomTime(){var val=parseInt(document.getElementById('customTimeInput').value);if(val>0&&val<=999){customTime=val;addLog('Duration set to '+customTime+' minutes','info');}}"
-""
-"function selectDosMethod(method){dosMethod=method;document.querySelectorAll('.dos-btn').forEach(el=>el.classList.remove('active'));event.target.classList.add('active');}"
-"function selectHandshakeMethod(method){handshakeMethod=method;document.querySelectorAll('.handshake-btn').forEach(el=>el.classList.remove('active'));event.target.classList.add('active');}"
-""
-"async function startBeaconSpam(){var m=document.getElementById('beaconMode').value;var c=document.getElementById('beaconCount').value;addLog('Starting Beacon Spam - Mode:'+m+' Count:'+c,'attack');await fetch('/api/beacon/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:parseInt(m),count:parseInt(c)})});addLog('Beacon spam active!','success');}"
-"async function stopBeaconSpam(){await fetch('/api/beacon/stop',{method:'POST'});addLog('Beacon spam stopped','warning');}"
-""
-"async function startDosAttack(){if(!selectedNetwork){addLog('ERROR: No network selected!','warning');return;}addLog('🚀 STARTING DoS attack on '+selectedNetwork.ssid+' (Method: '+dosMethod+')','attack');await fetch('/api/dos/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bssid:selectedNetwork.bssid,channel:selectedNetwork.channel,method:dosMethod})});addLog('DoS attack started!','success');}"
-""
-"async function startHandshakeCapture(){if(!selectedNetwork){addLog('ERROR: No network selected!','warning');return;}addLog('🔑 Starting Handshake capture on '+selectedNetwork.ssid,'attack');await fetch('/api/handshake/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bssid:selectedNetwork.bssid,channel:selectedNetwork.channel,method:handshakeMethod})});addLog('Handshake capture started! Waiting for EAPOL...','success');}"
-""
-"async function startPmkidAttack(){if(!selectedNetwork){addLog('ERROR: No network selected!','warning');return;}addLog('🔐 Starting PMKID attack on '+selectedNetwork.ssid,'attack');await fetch('/api/pmkid/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bssid:selectedNetwork.bssid,channel:selectedNetwork.channel})});addLog('PMKID attack started!','success');}"
-""
-"async function startProbeSniffer(){addLog('👻 Starting Probe Sniffer/Ghost AP attack','attack');await fetch('/api/probe/start',{method:'POST'});addLog('Probe sniffer active! Creating ghost APs...','success');}"
-""
-"async function startEvilTwin(){if(!selectedNetwork){addLog('ERROR: No network selected!','warning');return;}addLog('🎭 Starting Evil Twin attack on '+selectedNetwork.ssid,'attack');await fetch('/api/eviltwin/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bssid:selectedNetwork.bssid,ssid:selectedNetwork.ssid,channel:selectedNetwork.channel})});addLog('Evil Twin active! Waiting for victim password...','success');}"
-""
-"async function stopAllAttacks(){await fetch('/api/stop/all',{method:'POST'});addLog('All attacks stopped','warning');document.getElementById('statusMsg').innerHTML='⏹️ All attacks stopped';document.getElementById('attackStatus').className='status idle';}"
-""
-"async function scanNetworks(){addLog('Scanning for networks...','info');document.getElementById('scanBtn').disabled=true;document.getElementById('scanBtn').innerHTML='📡 Scanning...';var response=await fetch('/api/scan');var networks=await response.json();displayNetworks(networks);addLog('Found '+networks.length+' networks','success');document.getElementById('scanBtn').disabled=false;document.getElementById('scanBtn').innerHTML='📡 Scan Networks';}"
-""
-"function displayNetworks(networks){var tbody=document.getElementById('networksTable');tbody.innerHTML='';networks.forEach(function(net){var row=tbody.insertRow();row.insertCell(0).innerHTML=net.ssid||'<i>Hidden</i>';row.insertCell(1).innerHTML=net.bssid;row.insertCell(2).innerHTML=net.channel;row.insertCell(3).innerHTML=net.rssi+' dBm';row.insertCell(4).innerHTML=net.authmode;var actionCell=row.insertCell(5);var selectBtn=document.createElement('button');selectBtn.innerHTML='📌 Select';selectBtn.className='select-btn';selectBtn.onclick=function(){selectNetwork(net.bssid,net.ssid,net.channel);};actionCell.appendChild(selectBtn);});}"
-""
-"function selectNetwork(bssid,ssid,channel){selectedNetwork={bssid:bssid,ssid:ssid,channel:channel};document.getElementById('selectedDisplay').innerHTML='✅ SELECTED: '+ssid+' | '+bssid+' | CH '+channel;addLog('Target selected: '+ssid,'success');}"
-""
-"async function startDeauthAttack(){if(!selectedNetwork){addLog('ERROR: No network selected!','warning');return;}addLog('🚀 STARTING DEAUTH attack on '+selectedNetwork.ssid,'attack');addLog('⏱️ Duration: '+customTime+' minutes','info');var response=await fetch('/api/attack',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bssid:selectedNetwork.bssid,channel:selectedNetwork.channel,minutes:customTime})});var result=await response.json();if(result.success){document.getElementById('attackStatus').className='status attacking';document.getElementById('statusMsg').innerHTML='🔴 ATTACKING: '+selectedNetwork.ssid;addLog('✅ Attack active! Auto-stop in '+customTime+' minutes','success');}else{addLog('❌ Attack failed','warning');}}"
-""
-"async function stopDeauthAttack(){await fetch('/api/stop',{method:'POST'});addLog('⏹️ Deauth attack stopped','warning');document.getElementById('statusMsg').innerHTML='⏹️ Attack stopped';document.getElementById('attackStatus').className='status idle';}"
-""
-"async function updateStatus(){try{var response=await fetch('/api/status');var data=await response.json();if(data.attacking){document.getElementById('attackStatus').className='status attacking';document.getElementById('statusMsg').innerHTML='🔴 ATTACKING: '+data.target;if(data.remaining){var mins=Math.floor(data.remaining/60);var secs=data.remaining%60;document.getElementById('timerDisplay').innerHTML='⏱️ '+mins+'m '+secs+'s';}}else{document.getElementById('timerDisplay').innerHTML='⏱️ Idle';}}catch(e){}}"
-""
-"async function updateDetector(){try{var response=await fetch('/api/detector');var data=await response.json();var alertsDiv=document.getElementById('alerts');if(data.alerts&&data.alerts.length>0){alertsDiv.innerHTML=data.alerts.map(function(alert){return'<div class=\"log-entry attack\"><strong>⚠️ DEAUTH DETECTED!</strong><br>BSSID: '+alert.bssid+'<br>Frames: '+alert.count+'</div>';}).join('');addLog('⚠️ Deauth attack detected!','warning');}else{alertsDiv.innerHTML='<div class=\"log-entry\">✅ No deauth attacks detected</div>';}document.getElementById('statsTracked').innerHTML=data.tracked_bssids;}catch(e){}}"
-""
-"document.addEventListener('DOMContentLoaded',function(){var savedTheme=localStorage.getItem('theme')||'dark';document.documentElement.setAttribute('data-theme',savedTheme);selectModule('wifi');selectAttack('deauth');scanNetworks();setInterval(updateStatus,2000);setInterval(updateDetector,3000);});"
-"</script></head><body>"
-"<div class='container'>"
-"<div class='header'><div class='logo-section'><div class='logo'>🛡️</div><div class='title'><h1>Omega Solutions</h1><div class='subtitle'>Complete Security Suite v4.0</div></div></div>"
-"<div><button class='theme-toggle' onclick='toggleTheme()'>🌓</button><button class='theme-toggle' onclick='logout()' style='margin-left:10px'>🚪</button></div></div>"
-""
-"<div class='icon-menu'>"
-"<div class='icon-item active' id='icon-wifi' onclick='selectModule(\"wifi\")'><span class='icon-large'>📡</span><span class='icon-label'>WIFI</span></div>"
-"<div class='icon-item' id='icon-ble' onclick='selectModule(\"ble\")'><span class='icon-large'>🔵</span><span class='icon-label'>BLE</span></div>"
-"<div class='icon-item' id='icon-mesh' onclick='selectModule(\"mesh\")'><span class='icon-large'>🕸️</span><span class='icon-label'>MESH</span></div>"
-"</div>"
-""
-"<!-- WiFi Attacks -->"
-"<div id='wifi-attacks' class='attacks-container active'>"
-"<div class='attack-buttons'>"
-"<div class='attack-card selected' id='attack-deauth' onclick='selectAttack(\"deauth\")'><div class='attack-name'>⚡ Deauth Attack</div><div class='attack-status'>Active</div></div>"
-"<div class='attack-card' id='attack-beacon' onclick='selectAttack(\"beacon\")'><div class='attack-name'>📡 Beacon Spam</div><div class='attack-status'>Active</div></div>"
-"<div class='attack-card' id='attack-dos' onclick='selectAttack(\"dos\")'><div class='attack-name'>💀 DoS Attack</div><div class='attack-status'>Active</div></div>"
-"<div class='attack-card' id='attack-handshake' onclick='selectAttack(\"handshake\")'><div class='attack-name'>🤝 Handshake</div><div class='attack-status'>Active</div></div>"
-"<div class='attack-card' id='attack-pmkid' onclick='selectAttack(\"pmkid\")'><div class='attack-name'>🔐 PMKID</div><div class='attack-status'>Active</div></div>"
-"<div class='attack-card' id='attack-probe' onclick='selectAttack(\"probe\")'><div class='attack-name'>👻 Probe Sniff</div><div class='attack-status'>Active</div></div>"
-"<div class='attack-card' id='attack-eviltwin' onclick='selectAttack(\"eviltwin\")'><div class='attack-name'>🎭 Evil Twin</div><div class='attack-status'>Active</div></div>"
-"</div></div>"
-""
-"<!-- BLE Attacks -->"
-"<div id='ble-attacks' class='attacks-container'><div class='attack-buttons'>"
-"<div class='attack-card'><div class='attack-name'>🔍 BLE Scan</div><div class='attack-status'>Soon</div></div>"
-"<div class='attack-card'><div class='attack-name'>📢 BLE Spam</div><div class='attack-status'>Soon</div></div>"
-"</div></div>"
-""
-"<!-- Mesh Attacks -->"
-"<div id='mesh-attacks' class='attacks-container'><div class='attack-buttons'>"
-"<div class='attack-card'><div class='attack-name'>🔎 Mesh Scan</div><div class='attack-status'>Soon</div></div>"
-"<div class='attack-card'><div class='attack-name'>🌊 Mesh Flood</div><div class='attack-status'>Soon</div></div>"
-"</div></div>"
-""
-"<div class='grid'>"
-"<div class='card'><h2>🎯 Target Selection</h2>"
-"<div class='scan-controls'><button class='btn' id='scanBtn' onclick='scanNetworks()'>📡 Scan Networks</button></div>"
-"<div id='selectedDisplay' class='selected-network'>⚡ No network selected</div>"
-"<div style='overflow-x:auto;max-height:400px;overflow-y:auto;'><table id='networksTable'><thead><tr><th>SSID</th><th>BSSID</th><th>CH</th><th>RSSI</th><th>Security</th><th>Action</th></tr></thead><tbody><tr><td colspan='6'>Click Scan to find networks</tbody></table></div></div>"
-""
-"<div class='card'><h2>⚡ Attack Controller</h2>"
-""
-"<!-- Deauth Attack Panel -->"
-"<div id='deauthPanel' class='attack-panel'><div><strong>⏱️ Attack Duration:</strong></div><div class='time-input-area'><input type='number' id='customTimeInput' class='time-input' value='2' min='1' max='999' onchange='updateCustomTime()'><span>minutes</span><button class='btn' onclick='updateCustomTime()'>Set</button></div><div style='display:flex;gap:10px;margin-top:15px;'><button class='btn btn-danger' onclick='startDeauthAttack()' style='flex:1'>🔥 START DEAUTH</button><button class='btn btn-stop' onclick='stopDeauthAttack()' style='flex:1'>⏹️ STOP DEAUTH</button></div></div>"
-""
-"<!-- Beacon Spam Panel -->"
-"<div id='beaconPanel' class='beacon-config' style='display:none;'><div><strong>📡 Beacon Spam:</strong></div><div class='time-input-area'><select id='beaconMode' style='padding:10px;background:var(--bg-secondary);color:var(--text-primary);border-radius:8px;'><option value='0'>Common SSIDs</option><option value='1'>Garbage SSIDs</option><option value='2'>Rick Roll</option><option value='3'>Security/Troll</option></select><input type='number' id='beaconCount' value='50' min='1' max='100' style='padding:10px;width:80px;background:var(--bg-secondary);color:var(--text-primary);border-radius:8px;'><button class='btn' onclick='startBeaconSpam()'>Start</button><button class='btn btn-stop' onclick='stopBeaconSpam()'>Stop</button></div></div>"
-""
-"<!-- DoS Attack Panel -->"
-"<div id='dosPanel' class='dos-config' style='display:none;'><div><strong>💀 DoS Attack Methods:</strong></div><div class='dos-options'><button class='dos-btn active' onclick='selectDosMethod(0)'>Broadcast</button><button class='dos-btn' onclick='selectDosMethod(1)'>Rogue AP</button><button class='dos-btn' onclick='selectDosMethod(2)'>Combine All</button><button class='dos-btn' onclick='selectDosMethod(3)'>Super Clone</button></div><button class='btn btn-danger' onclick='startDosAttack()' style='width:100%'>🚀 START DoS</button></div>"
-""
-"<!-- Handshake Capture Panel -->"
-"<div id='handshakePanel' class='handshake-config' style='display:none;'><div><strong>🤝 Handshake Methods:</strong></div><div class='handshake-options'><button class='handshake-btn active' onclick='selectHandshakeMethod(0)'>Broadcast</button><button class='handshake-btn' onclick='selectHandshakeMethod(1)'>Rogue AP</button><button class='handshake-btn' onclick='selectHandshakeMethod(2)'>Passive</button></div><button class='btn btn-danger' onclick='startHandshakeCapture()' style='width:100%'>🔑 START CAPTURE</button></div>"
-""
-"<!-- PMKID Attack Panel -->"
-"<div id='pmkidPanel' class='attack-panel' style='display:none;'><button class='btn btn-danger' onclick='startPmkidAttack()' style='width:100%'>🔐 START PMKID ATTACK</button></div>"
-""
-"<!-- Probe Sniffer Panel -->"
-"<div id='probePanel' class='attack-panel' style='display:none;'><button class='btn btn-danger' onclick='startProbeSniffer()' style='width:100%'>👻 START PROBE SNIFFER</button></div>"
-""
-"<!-- Evil Twin Panel -->"
-"<div id='eviltwinPanel' class='attack-panel' style='display:none;'><button class='btn btn-danger' onclick='startEvilTwin()' style='width:100%'>🎭 START EVIL TWIN</button></div>"
-""
-"<div id='attackStatus' class='status idle'><span id='statusMsg'>🟢 System Ready</span> | <span id='timerDisplay'>⏱️ Idle</span></div>"
-"</div></div>"
-""
-"<div class='card'><h2>🛡️ Threat Detection</h2><div><span style='background:var(--gradient-1);padding:5px 10px;border-radius:20px;'>Tracking: <span id='statsTracked'>0</span> BSSIDs</span></div><div id='alerts' style='margin-top:10px;'></div></div>"
-"<div class='card'><h2>📋 Attack Log Terminal</h2><div id='logArea' class='log-area'></div></div>"
-"<div style='text-align:center;margin-top:10px;'><button class='btn btn-stop' onclick='stopAllAttacks()'>🛑 STOP ALL ATTACKS</button></div>"
-"</div></body></html>";
-#endif
 
 // Timer task for deauth
 static void attack_timer_task(void *pvParameters) {
@@ -868,19 +630,112 @@ static esp_err_t ble_spoof_stop_handler(httpd_req_t *req) {
 }
 
 static esp_err_t ble_connect_start_handler(httpd_req_t *req) {
-    if (!request_is_authenticated(req)) { httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized"); return ESP_FAIL; }
-    char content[200]; int ret = httpd_req_recv(req, content, sizeof(content)-1); if (ret<=0) return ESP_FAIL; content[ret]='\0'; cJSON *root=cJSON_Parse(content); if(!root) return ESP_FAIL; cJSON *addr=cJSON_GetObjectItem(root,"addr"); const char *saddr=cJSON_IsString(addr)?addr->valuestring:NULL; ble_connect_flood_start(saddr); cJSON_Delete(root); return send_success_response(req);
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    char content[200];
+    int ret = httpd_req_recv(req, content, sizeof(content) - 1);
+    if (ret <= 0) return ESP_FAIL;
+    content[ret] = '\0';
+    cJSON *root = cJSON_Parse(content);
+    if (!root) return ESP_FAIL;
+    cJSON *addr = cJSON_GetObjectItem(root, "addr");
+    const char *saddr = cJSON_IsString(addr) ? addr->valuestring : NULL;
+    ble_connect_flood_start(saddr);
+    cJSON_Delete(root);
+    return send_success_response(req);
 }
 
-static esp_err_t ble_connect_stop_handler(httpd_req_t *req) { if (!request_is_authenticated(req)) { httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized"); return ESP_FAIL; } ble_connect_flood_stop(); return send_success_response(req); }
+static esp_err_t ble_connect_stop_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    ble_connect_flood_stop();
+    return send_success_response(req);
+}
 
-static esp_err_t ble_l2cap_start_handler(httpd_req_t *req) { if (!request_is_authenticated(req)) { httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized"); return ESP_FAIL; } char content[200]; int ret = httpd_req_recv(req, content, sizeof(content)-1); if (ret<=0) return ESP_FAIL; content[ret]='\0'; cJSON *root=cJSON_Parse(content); if(!root) return ESP_FAIL; cJSON *addr=cJSON_GetObjectItem(root,"addr"); const char *saddr=cJSON_IsString(addr)?addr->valuestring:NULL; ble_l2cap_start(saddr); cJSON_Delete(root); return send_success_response(req); }
+static esp_err_t ble_l2cap_start_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    char content[200];
+    int ret = httpd_req_recv(req, content, sizeof(content) - 1);
+    if (ret <= 0) return ESP_FAIL;
+    content[ret] = '\0';
+    cJSON *root = cJSON_Parse(content);
+    if (!root) return ESP_FAIL;
+    cJSON *addr = cJSON_GetObjectItem(root, "addr");
+    const char *saddr = cJSON_IsString(addr) ? addr->valuestring : NULL;
+    ble_l2cap_start(saddr);
+    cJSON_Delete(root);
+    return send_success_response(req);
+}
 
-static esp_err_t ble_l2cap_stop_handler(httpd_req_t *req) { if (!request_is_authenticated(req)) { httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized"); return ESP_FAIL; } ble_l2cap_stop(); return send_success_response(req); }
+static esp_err_t ble_l2cap_stop_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    ble_l2cap_stop();
+    return send_success_response(req);
+}
 
-static esp_err_t ble_gatt_start_handler(httpd_req_t *req) { if (!request_is_authenticated(req)) { httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized"); return ESP_FAIL; } char content[200]; int ret = httpd_req_recv(req, content, sizeof(content)-1); if (ret<=0) return ESP_FAIL; content[ret]='\0'; cJSON *root=cJSON_Parse(content); if(!root) return ESP_FAIL; cJSON *addr=cJSON_GetObjectItem(root,"addr"); const char *saddr=cJSON_IsString(addr)?addr->valuestring:NULL; ble_gatt_probe_start(saddr); cJSON_Delete(root); return send_success_response(req); }
+static esp_err_t ble_gatt_start_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    char content[200];
+    int ret = httpd_req_recv(req, content, sizeof(content) - 1);
+    if (ret <= 0) return ESP_FAIL;
+    content[ret] = '\0';
+    cJSON *root = cJSON_Parse(content);
+    if (!root) return ESP_FAIL;
+    cJSON *addr = cJSON_GetObjectItem(root, "addr");
+    const char *saddr = cJSON_IsString(addr) ? addr->valuestring : NULL;
+    ble_gatt_probe_start(saddr);
+    cJSON_Delete(root);
+    return send_success_response(req);
+}
 
-static esp_err_t ble_gatt_stop_handler(httpd_req_t *req) { if (!request_is_authenticated(req)) { httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized"); return ESP_FAIL; } ble_gatt_probe_stop(); return send_success_response(req); }
+static esp_err_t ble_gatt_stop_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    ble_gatt_probe_stop();
+    return send_success_response(req);
+}
+
+static esp_err_t ble_deauth_start_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    char content[200];
+    int ret = httpd_req_recv(req, content, sizeof(content) - 1);
+    if (ret <= 0) return ESP_FAIL;
+    content[ret] = '\0';
+    cJSON *root = cJSON_Parse(content);
+    if (!root) return ESP_FAIL;
+    cJSON *addr = cJSON_GetObjectItem(root, "addr");
+    const char *saddr = cJSON_IsString(addr) ? addr->valuestring : NULL;
+    ble_deauth_start(saddr);
+    cJSON_Delete(root);
+    return send_success_response(req);
+}
+
+static esp_err_t ble_deauth_stop_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    ble_deauth_stop();
+    return send_success_response(req);
+}
 
 static esp_err_t ble_scan_api_handler(httpd_req_t *req) {
     if (!request_is_authenticated(req)) {
@@ -932,8 +787,14 @@ static esp_err_t status_api_handler(httpd_req_t *req) {
     }
     cJSON_AddBoolToObject(response, "attacking", is_attack_active());
     cJSON_AddBoolToObject(response, "ble_running", attack_bt_spam_is_running());
+    cJSON_AddBoolToObject(response, "ble_deauth_running", ble_deauth_is_running());
+    cJSON_AddBoolToObject(response, "ble_connect_running", ble_connect_flood_is_running());
+    cJSON_AddBoolToObject(response, "ble_l2cap_running", ble_l2cap_is_running());
     if (attack_bt_spam_is_running()) {
         cJSON_AddStringToObject(response, "bluetooth", "BLE spam active");
+    }
+    if (ble_deauth_is_running()) {
+        cJSON_AddStringToObject(response, "ble_deauth", "BLE deauth active");
     }
     if (is_attack_active()) {
         char target[18];
@@ -1006,7 +867,6 @@ static esp_err_t dos_start_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
     
-    // Create attack config
     attack_config_t attack_config = {0};
     attack_config.target_count = 1;
     attack_config.ap_records[0] = &dos_target;
@@ -1147,6 +1007,11 @@ static esp_err_t stop_all_handler(httpd_req_t *req) {
     attack_probe_stop();
     attack_bt_spam_stop();
     attack_method_evil_twin_stop();
+    ble_deauth_stop();
+    ble_connect_flood_stop();
+    ble_l2cap_stop();
+    ble_gatt_probe_stop();
+    ble_spoof_stop();
 
     return send_success_response(req);
 }
@@ -1155,7 +1020,7 @@ void start_web_server(void) {
     httpd_handle_t server = NULL;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.lru_purge_enable = true;
-    config.max_uri_handlers = 48;
+    config.max_uri_handlers = 50;
     
     if (httpd_start(&server, &config) == ESP_OK) {
         server_handle = server;
@@ -1200,30 +1065,34 @@ void start_web_server(void) {
         httpd_register_uri_handler(server, &probe_start);
         httpd_uri_t eviltwin_start = { .uri = "/api/eviltwin/start", .method = HTTP_POST, .handler = eviltwin_start_handler };
         httpd_register_uri_handler(server, &eviltwin_start);
-        httpd_uri_t ble_scan = { .uri = "/api/ble/scan", .method = HTTP_GET, .handler = ble_scan_api_handler };
-        httpd_register_uri_handler(server, &ble_scan);
-        httpd_uri_t ble_status = { .uri = "/api/ble/status", .method = HTTP_GET, .handler = ble_status_api_handler };
-        httpd_register_uri_handler(server, &ble_status);
-        httpd_uri_t ble_spam_start = { .uri = "/api/ble/spam/start", .method = HTTP_POST, .handler = ble_spam_start_handler };
-        httpd_register_uri_handler(server, &ble_spam_start);
-        httpd_uri_t ble_spam_stop = { .uri = "/api/ble/spam/stop", .method = HTTP_POST, .handler = ble_spam_stop_handler };
-        httpd_register_uri_handler(server, &ble_spam_stop);
-        httpd_uri_t ble_spoof_start = { .uri = "/api/ble/spoof/start", .method = HTTP_POST, .handler = ble_spoof_start_handler };
-        httpd_register_uri_handler(server, &ble_spoof_start);
-        httpd_uri_t ble_spoof_stop = { .uri = "/api/ble/spoof/stop", .method = HTTP_POST, .handler = ble_spoof_stop_handler };
-        httpd_register_uri_handler(server, &ble_spoof_stop);
-        httpd_uri_t ble_connect_start = { .uri = "/api/ble/connect/start", .method = HTTP_POST, .handler = ble_connect_start_handler };
-        httpd_register_uri_handler(server, &ble_connect_start);
-        httpd_uri_t ble_connect_stop = { .uri = "/api/ble/connect/stop", .method = HTTP_POST, .handler = ble_connect_stop_handler };
-        httpd_register_uri_handler(server, &ble_connect_stop);
-        httpd_uri_t ble_l2cap_start = { .uri = "/api/ble/l2cap/start", .method = HTTP_POST, .handler = ble_l2cap_start_handler };
-        httpd_register_uri_handler(server, &ble_l2cap_start);
-        httpd_uri_t ble_l2cap_stop = { .uri = "/api/ble/l2cap/stop", .method = HTTP_POST, .handler = ble_l2cap_stop_handler };
-        httpd_register_uri_handler(server, &ble_l2cap_stop);
-        httpd_uri_t ble_gatt_start = { .uri = "/api/ble/gatt/start", .method = HTTP_POST, .handler = ble_gatt_start_handler };
-        httpd_register_uri_handler(server, &ble_gatt_start);
-        httpd_uri_t ble_gatt_stop = { .uri = "/api/ble/gatt/stop", .method = HTTP_POST, .handler = ble_gatt_stop_handler };
-        httpd_register_uri_handler(server, &ble_gatt_stop);
+        httpd_uri_t ble_scan_uri = { .uri = "/api/ble/scan", .method = HTTP_GET, .handler = ble_scan_api_handler };
+        httpd_register_uri_handler(server, &ble_scan_uri);
+        httpd_uri_t ble_status_uri = { .uri = "/api/ble/status", .method = HTTP_GET, .handler = ble_status_api_handler };
+        httpd_register_uri_handler(server, &ble_status_uri);
+        httpd_uri_t ble_spam_start_uri = { .uri = "/api/ble/spam/start", .method = HTTP_POST, .handler = ble_spam_start_handler };
+        httpd_register_uri_handler(server, &ble_spam_start_uri);
+        httpd_uri_t ble_spam_stop_uri = { .uri = "/api/ble/spam/stop", .method = HTTP_POST, .handler = ble_spam_stop_handler };
+        httpd_register_uri_handler(server, &ble_spam_stop_uri);
+        httpd_uri_t ble_spoof_start_uri = { .uri = "/api/ble/spoof/start", .method = HTTP_POST, .handler = ble_spoof_start_handler };
+        httpd_register_uri_handler(server, &ble_spoof_start_uri);
+        httpd_uri_t ble_spoof_stop_uri = { .uri = "/api/ble/spoof/stop", .method = HTTP_POST, .handler = ble_spoof_stop_handler };
+        httpd_register_uri_handler(server, &ble_spoof_stop_uri);
+        httpd_uri_t ble_connect_start_uri = { .uri = "/api/ble/connect/start", .method = HTTP_POST, .handler = ble_connect_start_handler };
+        httpd_register_uri_handler(server, &ble_connect_start_uri);
+        httpd_uri_t ble_connect_stop_uri = { .uri = "/api/ble/connect/stop", .method = HTTP_POST, .handler = ble_connect_stop_handler };
+        httpd_register_uri_handler(server, &ble_connect_stop_uri);
+        httpd_uri_t ble_l2cap_start_uri = { .uri = "/api/ble/l2cap/start", .method = HTTP_POST, .handler = ble_l2cap_start_handler };
+        httpd_register_uri_handler(server, &ble_l2cap_start_uri);
+        httpd_uri_t ble_l2cap_stop_uri = { .uri = "/api/ble/l2cap/stop", .method = HTTP_POST, .handler = ble_l2cap_stop_handler };
+        httpd_register_uri_handler(server, &ble_l2cap_stop_uri);
+        httpd_uri_t ble_gatt_start_uri = { .uri = "/api/ble/gatt/start", .method = HTTP_POST, .handler = ble_gatt_start_handler };
+        httpd_register_uri_handler(server, &ble_gatt_start_uri);
+        httpd_uri_t ble_gatt_stop_uri = { .uri = "/api/ble/gatt/stop", .method = HTTP_POST, .handler = ble_gatt_stop_handler };
+        httpd_register_uri_handler(server, &ble_gatt_stop_uri);
+        httpd_uri_t ble_deauth_start_uri = { .uri = "/api/ble/deauth/start", .method = HTTP_POST, .handler = ble_deauth_start_handler };
+        httpd_register_uri_handler(server, &ble_deauth_start_uri);
+        httpd_uri_t ble_deauth_stop_uri = { .uri = "/api/ble/deauth/stop", .method = HTTP_POST, .handler = ble_deauth_stop_handler };
+        httpd_register_uri_handler(server, &ble_deauth_stop_uri);
         httpd_uri_t stop_all = { .uri = "/api/stop/all", .method = HTTP_POST, .handler = stop_all_handler };
         httpd_register_uri_handler(server, &stop_all);
         
@@ -1231,7 +1100,7 @@ void start_web_server(void) {
         ESP_LOGI(TAG, "Omega Solutions - Complete Security Suite v4.0");
         ESP_LOGI(TAG, "Web server started! Open http://192.168.4.1");
         ESP_LOGI(TAG, "Username: omega | Password: solutions123");
-        ESP_LOGI(TAG, "Available Attacks: Deauth, Beacon, DoS, Handshake, PMKID, Probe, EvilTwin, BLE Spam");
+        ESP_LOGI(TAG, "Available Attacks: Deauth, Beacon, DoS, Handshake, PMKID, Probe, EvilTwin, BLE Spam, BLE Deauth");
         ESP_LOGI(TAG, "==========================================");
     }
 }

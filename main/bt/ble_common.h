@@ -39,5 +39,5 @@ uint8_t ble_common_own_addr_type(void);
 
 /* Generate and set a random BLE address */
 void ble_common_ensure_rnd_addr(void);
-
+void ble_common_disconnect_all(void);
 #endif /* BLE_COMMON_H */

