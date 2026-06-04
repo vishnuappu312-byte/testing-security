@@ -31,6 +31,8 @@ idf_component_register(
         "bt/ble_gatt_probe.c"
         "bt/ble_common.c"
         "bt/ble_deauth.c"
+        "bt/ble_takeover.c"
+        "bt/ble_passkey.c"
 
     INCLUDE_DIRS
         "."

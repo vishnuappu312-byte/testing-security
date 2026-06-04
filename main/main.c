@@ -26,6 +26,8 @@
 #include "bt/ble_l2cap_flood.h"
 #include "bt/ble_gatt_probe.h"
 #include "bt/ble_deauth.h"
+#include "bt/ble_passkey.h"
+#include "bt/ble_takeover.h"
 static const char *TAG = "MAIN";
 
 void app_main(void) {
@@ -46,7 +48,11 @@ void app_main(void) {
     }
     
     scanner_init();
+
     ble_deauth_init();
+        ble_passkey_init();
+
+    ble_takeover_init();
     deauth_attack_init();
     deauth_detector_start();
     attack_init();
