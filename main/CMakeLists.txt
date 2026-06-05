@@ -49,4 +49,5 @@ idf_component_register(
         esp_http_server
         json
         bt
+        spiffs
 )

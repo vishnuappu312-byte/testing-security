@@ -562,6 +562,25 @@ static esp_err_t beacon_stop_handler(httpd_req_t *req) {
     return send_success_response(req);
 }
 
+static esp_err_t beacon_status_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    cJSON *status = attack_beacon_spam_get_status_json();
+    if (!status) {
+        cJSON *fallback = cJSON_CreateObject();
+        cJSON_AddBoolToObject(fallback, "running", false);
+        cJSON_AddStringToObject(fallback, "mode_str", "Idle");
+        cJSON_AddStringToObject(fallback, "status", "Idle");
+        cJSON_AddNumberToObject(fallback, "ap_count", 0);
+        cJSON_AddNumberToObject(fallback, "packet_count", 0);
+        return send_json_response(req, fallback);
+    }
+    return send_json_response(req, status);
+}
+
 static esp_err_t dos_start_handler(httpd_req_t *req) {
     if (!request_is_authenticated(req)) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
@@ -587,7 +606,7 @@ static esp_err_t dos_start_handler(httpd_req_t *req) {
     attack_config.target_count = 1;
     attack_config.ap_records[0] = &dos_target;
     int dos_method = cJSON_IsNumber(method_json) ? method_json->valueint : ATTACK_DOS_METHOD_BROADCAST;
-    if (dos_method < ATTACK_DOS_METHOD_ROGUE_AP || dos_method > ATTACK_DOS_METHOD_SUPER_CLONE) {
+    if (dos_method <= ATTACK_DOS_METHOD_NONE || dos_method >= ATTACK_DOS_METHOD_COUNT) {
         cJSON_Delete(root);
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid method");
         return ESP_FAIL;
@@ -600,6 +619,37 @@ static esp_err_t dos_start_handler(httpd_req_t *req) {
     cJSON_Delete(root);
     return send_success_response(req);
 }
+
+static esp_err_t dos_stop_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Stopping DoS attack");
+    attack_dos_stop();
+    return send_success_response(req);
+}
+
+static esp_err_t dos_status_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    cJSON *status = attack_dos_get_status_json();
+    if (!status) {
+        cJSON *fallback = cJSON_CreateObject();
+        cJSON_AddBoolToObject(fallback, "running", false);
+        cJSON_AddStringToObject(fallback, "method_str", "Idle");
+        cJSON_AddStringToObject(fallback, "status", "Idle");
+        cJSON_AddNumberToObject(fallback, "packet_count", 0);
+        return send_json_response(req, fallback);
+    }
+    return send_json_response(req, status);
+}
+
+/* ── Handshake Capture Handlers ──────────────────────────────────── */
 
 static esp_err_t handshake_start_handler(httpd_req_t *req) {
     if (!request_is_authenticated(req)) {
@@ -640,6 +690,58 @@ static esp_err_t handshake_start_handler(httpd_req_t *req) {
     return send_success_response(req);
 }
 
+static esp_err_t handshake_stop_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Stopping Handshake capture");
+    attack_handshake_stop();
+    return send_success_response(req);
+}
+
+static esp_err_t handshake_status_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    cJSON *status = attack_handshake_get_status_json();
+    if (!status) {
+        cJSON *fallback = cJSON_CreateObject();
+        cJSON_AddBoolToObject(fallback, "running", false);
+        cJSON_AddNumberToObject(fallback, "eapol_count", 0);
+        cJSON_AddNumberToObject(fallback, "eapol_required", 4);
+        cJSON_AddStringToObject(fallback, "status", "idle");
+        return send_json_response(req, fallback);
+    }
+    return send_json_response(req, status);
+}
+
+static esp_err_t handshake_pcap_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    size_t pcap_size = attack_handshake_get_pcap_size();
+    const uint8_t *pcap_data = attack_handshake_get_pcap_data();
+
+    if (!pcap_data || pcap_size == 0) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "No PCAP data available");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/octet-stream");
+    httpd_resp_set_hdr(req, "Content-Disposition",
+                       "attachment; filename=\"handshake.pcap\"");
+    httpd_resp_send(req, (const char *)pcap_data, pcap_size);
+    return ESP_OK;
+}
+
+/* ── PMKID Attack Handlers ── */
+
 static esp_err_t pmkid_start_handler(httpd_req_t *req) {
     if (!request_is_authenticated(req)) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
@@ -663,12 +765,62 @@ static esp_err_t pmkid_start_handler(httpd_req_t *req) {
     attack_config.target_count = 1;
     attack_config.ap_records[0] = &pmkid_target;
     
-    ESP_LOGI(TAG, "Starting PMKID attack");
+    ESP_LOGI(TAG, "Starting PMKID attack on SSID: %s", pmkid_target.ssid);
     attack_pmkid_start(&attack_config);
     
     cJSON_Delete(root);
     return send_success_response(req);
 }
+
+static esp_err_t pmkid_stop_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    attack_pmkid_stop();
+    return send_success_response(req);
+}
+
+static esp_err_t pmkid_status_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    char *json = attack_pmkid_get_status_json();
+    if (json) {
+        httpd_resp_sendstr(req, json);
+        free(json);
+    } else {
+        httpd_resp_sendstr(req, "{\"running\":false,\"captured\":false}");
+    }
+    return ESP_OK;
+}
+
+static esp_err_t pmkid_hash_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    if (!attack_pmkid_has_capture()) {
+        cJSON *root = cJSON_CreateObject();
+        cJSON_AddBoolToObject(root, "captured", false);
+        return send_json_response(req, root);
+    }
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "captured", true);
+    cJSON_AddStringToObject(root, "ssid", attack_pmkid_get_ssid());
+    char bssid_str[18];
+    const uint8_t *b = attack_pmkid_get_bssid();
+    snprintf(bssid_str, sizeof(bssid_str), "%02X:%02X:%02X:%02X:%02X:%02X",
+             b[0], b[1], b[2], b[3], b[4], b[5]);
+    cJSON_AddStringToObject(root, "bssid", bssid_str);
+    cJSON_AddStringToObject(root, "hash", attack_pmkid_get_hash());
+    cJSON_AddNumberToObject(root, "hashcat_mode", 16800);
+    return send_json_response(req, root);
+}
+
+/* ── Probe Sniffer Handlers ── */
 
 static esp_err_t probe_start_handler(httpd_req_t *req) {
     if (!request_is_authenticated(req)) {
@@ -682,13 +834,79 @@ static esp_err_t probe_start_handler(httpd_req_t *req) {
     return send_success_response(req);
 }
 
+static esp_err_t probe_stop_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    ESP_LOGI(TAG, "Stopping Probe Sniffer");
+    attack_probe_stop();
+    return send_success_response(req);
+}
+
+static esp_err_t probe_status_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, attack_probe_get_status_json());
+    return ESP_OK;
+}
+
+static esp_err_t probe_ghosts_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    probe_ghost_entry_t entries[PROBE_MAX_GHOSTS];
+    int count = 0;
+    attack_probe_get_ghosts(entries, PROBE_MAX_GHOSTS, &count);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON *arr = cJSON_CreateArray();
+    for (int i = 0; i < count; i++) {
+        cJSON *item = cJSON_CreateObject();
+        cJSON_AddStringToObject(item, "ssid", entries[i].ssid);
+        cJSON_AddNumberToObject(item, "rssi", entries[i].rssi);
+        cJSON_AddNumberToObject(item, "probes", entries[i].probe_count);
+        cJSON_AddNumberToObject(item, "channel", entries[i].channel);
+        char bssid_str[18];
+        snprintf(bssid_str, sizeof(bssid_str), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 entries[i].bssid[0], entries[i].bssid[1], entries[i].bssid[2],
+                 entries[i].bssid[3], entries[i].bssid[4], entries[i].bssid[5]);
+        cJSON_AddStringToObject(item, "bssid", bssid_str);
+        cJSON_AddItemToArray(arr, item);
+    }
+    cJSON_AddItemToObject(root, "ghosts", arr);
+    cJSON_AddNumberToObject(root, "count", count);
+
+    char *json = cJSON_PrintUnformatted(root);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json);
+    free(json);
+    cJSON_Delete(root);
+    return ESP_OK;
+}
+
+static esp_err_t probe_clear_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    attack_probe_clear_ghosts();
+    return send_success_response(req);
+}
+
+/* ── Evil Twin Handlers ── */
+
 static esp_err_t eviltwin_start_handler(httpd_req_t *req) {
     if (!request_is_authenticated(req)) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
         return ESP_FAIL;
     }
     
-    char content[200];
+    char content[512];
     int ret = httpd_req_recv(req, content, sizeof(content) - 1);
     if (ret <= 0) return ESP_FAIL;
     content[ret] = '\0';
@@ -701,10 +919,103 @@ static esp_err_t eviltwin_start_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
     
-    ESP_LOGI(TAG, "Starting Evil Twin attack on SSID: %s", evil_twin_target.ssid);
-    attack_method_evil_twin(&evil_twin_target);
+    cJSON *portal_json   = cJSON_GetObjectItem(root, "use_captive_portal");
+    cJSON *deauth_json   = cJSON_GetObjectItem(root, "use_deauth");
+    cJSON *verify_json   = cJSON_GetObjectItem(root, "verify_passwords");
+    cJSON *interval_json = cJSON_GetObjectItem(root, "deauth_interval_sec");
+    
+    eviltwin_config_t et_config = {0};
+    strncpy(et_config.ssid, (char *)evil_twin_target.ssid, EVILTWIN_MAX_SSID_LEN - 1);
+    et_config.channel = evil_twin_target.primary;
+    memcpy(et_config.bssid, evil_twin_target.bssid, 6);
+    et_config.use_captive_portal = cJSON_IsBool(portal_json) ? portal_json->valueint : true;
+    et_config.use_deauth         = cJSON_IsBool(deauth_json) ? deauth_json->valueint : true;
+    et_config.verify_passwords   = cJSON_IsBool(verify_json) ? verify_json->valueint : true;
+    et_config.deauth_interval_sec = cJSON_IsNumber(interval_json) ? interval_json->valueint : 15;
+    if (et_config.deauth_interval_sec < 5) et_config.deauth_interval_sec = 5;
+    if (et_config.deauth_interval_sec > 120) et_config.deauth_interval_sec = 120;
+    
+    ESP_LOGI(TAG, "Starting Evil Twin attack on SSID: %s (portal=%d deauth=%d verify=%d interval=%d)",
+             et_config.ssid, et_config.use_captive_portal, et_config.use_deauth,
+             et_config.verify_passwords, et_config.deauth_interval_sec);
+    
+    attack_eviltwin_start(&et_config);
     
     cJSON_Delete(root);
+    return send_success_response(req);
+}
+
+static esp_err_t eviltwin_stop_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    attack_eviltwin_stop();
+    return send_success_response(req);
+}
+
+static esp_err_t eviltwin_status_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, attack_eviltwin_get_status_json());
+    return ESP_OK;
+}
+
+static esp_err_t eviltwin_passwords_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    eviltwin_password_entry_t entries[EVILTWIN_MAX_PASSWORDS];
+    int count = 0;
+    attack_eviltwin_get_captured_passwords(entries, EVILTWIN_MAX_PASSWORDS, &count);
+
+    eviltwin_status_t st;
+    attack_eviltwin_get_status(&st);
+
+    cJSON *root = cJSON_CreateObject();
+    if (root == NULL) {
+        return send_json_response(req, root);
+    }
+
+    cJSON *pw_array = cJSON_CreateArray();
+    if (pw_array == NULL) {
+        cJSON_Delete(root);
+        return send_json_response(req, NULL);
+    }
+
+    for (int i = 0; i < count; i++) {
+        cJSON *entry = cJSON_CreateObject();
+        if (entry == NULL) continue;
+        cJSON_AddStringToObject(entry, "password", entries[i].password);
+        cJSON_AddBoolToObject(entry, "verified", entries[i].verified);
+        cJSON_AddNumberToObject(entry, "attempt_count", entries[i].attempt_count);
+        cJSON_AddItemToArray(pw_array, entry);
+    }
+
+    cJSON_AddItemToObject(root, "passwords", pw_array);
+    cJSON_AddNumberToObject(root, "total", count);
+    if (st.password_verified) {
+        cJSON_AddStringToObject(root, "verified_password", st.verified_password);
+    }
+
+    esp_err_t err = send_json_response(req, root);
+    return err;
+}
+
+static esp_err_t eviltwin_clear_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    attack_eviltwin_clear_passwords();
     return send_success_response(req);
 }
 
@@ -797,8 +1108,6 @@ static esp_err_t ble_spoof_stop_handler(httpd_req_t *req) {
     return send_success_response(req);
 }
 
-/* ---- NEW: BLE Clone Handler ---- */
-
 static esp_err_t ble_spoof_clone_handler(httpd_req_t *req) {
     if (!request_is_authenticated(req)) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
@@ -836,7 +1145,6 @@ static esp_err_t ble_spoof_clone_handler(httpd_req_t *req) {
              clone_opt);
 
     if (adv_hex != NULL && strlen(adv_hex) > 0) {
-        /* Parse hex string to raw bytes */
         size_t hex_len = strlen(adv_hex);
         if (hex_len % 2 != 0 || hex_len / 2 > 31) {
             cJSON_Delete(root);
@@ -858,42 +1166,34 @@ static esp_err_t ble_spoof_clone_handler(httpd_req_t *req) {
             raw_adv[i] = (uint8_t)byte;
         }
 
-        /* Parse the raw adv into a structured profile */
         ble_spoof_clone_profile_t profile;
         memset(&profile, 0, sizeof(profile));
         ble_spoof_parse_adv(raw_adv, (uint8_t)raw_len, &profile);
 
-        /* Store raw fallback for perfect clone */
         memcpy(profile.raw_adv, raw_adv, raw_len);
         profile.raw_adv_len = (uint8_t)raw_len;
 
-        /* Apply clone option */
         if (strcmp(clone_opt, "nameonly") == 0) {
-            /* Name-only: keep just flags + name, strip everything else */
             profile.svc_uuids_16_count = 0;
             profile.svc_uuids_128_count = 0;
             profile.has_appearance = false;
             profile.has_tx_power = false;
             profile.has_mfr_data = false;
-            profile.raw_adv_len = 0;  /* force rebuild without raw */
+            profile.raw_adv_len = 0;
         } else if (strcmp(clone_opt, "stealth") == 0) {
-            /* Stealth: strip the name, keep everything else */
             profile.name[0] = '\0';
-            profile.raw_adv_len = 0;  /* force rebuild without raw */
+            profile.raw_adv_len = 0;
         }
-        /* "full" keeps everything as-is */
 
-        /* Override name if custom_name provided */
         if (custom_name && strlen(custom_name) > 0) {
             strncpy(profile.name, custom_name, BLE_SPOOF_MAX_NAME_LEN);
             profile.name[BLE_SPOOF_MAX_NAME_LEN] = '\0';
-            profile.raw_adv_len = 0;  /* force rebuild with new name */
+            profile.raw_adv_len = 0;
         }
 
         ble_spoof_clone_start(&profile);
 
     } else if (device_name != NULL || custom_name != NULL) {
-        /* No raw adv data, just clone by name */
         ble_spoof_clone_profile_t profile;
         memset(&profile, 0, sizeof(profile));
         const char *use_name = (custom_name && strlen(custom_name) > 0)
@@ -1256,6 +1556,24 @@ static esp_err_t status_api_handler(httpd_req_t *req) {
     cJSON_AddBoolToObject(response, "ble_spoof_running", ble_spoof_is_running());
     cJSON_AddBoolToObject(response, "ble_passkey_running", ble_passkey_is_running());
     cJSON_AddBoolToObject(response, "ble_takeover_running", ble_takeover_is_running());
+    cJSON_AddBoolToObject(response, "eviltwin_running", attack_eviltwin_is_running());
+    cJSON_AddBoolToObject(response, "probe_running", attack_probe_is_running());
+    cJSON_AddBoolToObject(response, "pmkid_running", attack_pmkid_is_running());
+    cJSON_AddBoolToObject(response, "handshake_running", attack_handshake_is_running());
+    cJSON_AddBoolToObject(response, "dos_running", attack_dos_is_running());
+    cJSON_AddBoolToObject(response, "beacon_running", attack_beacon_spam_is_running());
+    cJSON_AddBoolToObject(response, "deauth_detect_running", deauth_detector_is_running());
+    if (attack_dos_is_running()) {
+        cJSON_AddStringToObject(response, "dos", "DoS attack active");
+        cJSON_AddStringToObject(response, "dos_method", attack_dos_get_method_str());
+        cJSON_AddNumberToObject(response, "dos_packets", attack_dos_get_packet_count());
+    }
+    if (attack_beacon_spam_is_running()) {
+        cJSON_AddStringToObject(response, "beacon", "Beacon spam active");
+        cJSON_AddStringToObject(response, "beacon_mode", attack_beacon_spam_get_mode_str());
+        cJSON_AddNumberToObject(response, "beacon_aps", attack_beacon_spam_get_ap_count());
+        cJSON_AddNumberToObject(response, "beacon_packets", attack_beacon_spam_get_packet_count());
+    }
     if (attack_bt_spam_is_running()) {
         cJSON_AddStringToObject(response, "bluetooth", "BLE spam active");
     }
@@ -1272,6 +1590,25 @@ static esp_err_t status_api_handler(httpd_req_t *req) {
     }
     if (ble_takeover_is_running()) {
         cJSON_AddStringToObject(response, "ble_takeover", "BLE device takeover active");
+    }
+    if (attack_pmkid_is_running()) {
+        cJSON_AddStringToObject(response, "pmkid", "PMKID capture active");
+    }
+    if (attack_handshake_is_running()) {
+        cJSON_AddStringToObject(response, "handshake", "Handshake capture active");
+    }
+    if (attack_eviltwin_is_running()) {
+        eviltwin_status_t et_st;
+        attack_eviltwin_get_status(&et_st);
+        cJSON_AddStringToObject(response, "eviltwin", "Evil Twin active");
+        cJSON_AddNumberToObject(response, "eviltwin_captured", et_st.captured_count);
+        cJSON_AddNumberToObject(response, "eviltwin_clients", et_st.clients_connected);
+    }
+    if (deauth_detector_is_running()) {
+        cJSON_AddStringToObject(response, "deauth_detect", "Deauth detector active");
+        cJSON_AddNumberToObject(response, "deauth_detect_tracked", deauth_detector_get_tracked_count());
+        cJSON_AddNumberToObject(response, "deauth_detect_alerts", deauth_detector_get_alert_count());
+        cJSON_AddNumberToObject(response, "deauth_detect_total", deauth_detector_get_total_deauths());
     }
     if (is_attack_active()) {
         char target[18];
@@ -1291,35 +1628,41 @@ static esp_err_t detector_api_handler(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
         return ESP_FAIL;
     }
-    
-    const deauth_detector_status_t *status = deauth_detector_get_status();
-    cJSON *root = cJSON_CreateObject();
-    if (root == NULL) {
-        return send_json_response(req, root);
+
+    /* Use the full status JSON from attack_deauth_detector */
+    cJSON *status = deauth_detector_get_status_json();
+    if (!status) {
+        cJSON *fallback = cJSON_CreateObject();
+        cJSON_AddBoolToObject(fallback, "running", false);
+        cJSON_AddStringToObject(fallback, "status", "Idle");
+        cJSON_AddNumberToObject(fallback, "tracked_count", 0);
+        cJSON_AddNumberToObject(fallback, "alert_count", 0);
+        cJSON_AddNumberToObject(fallback, "total_deauths", 0);
+        return send_json_response(req, fallback);
     }
-    cJSON_AddBoolToObject(root, "running", status->running);
-    cJSON_AddNumberToObject(root, "tracked_bssids", status->count);
-    cJSON *alerts = cJSON_CreateArray();
-    if (alerts == NULL) {
-        cJSON_Delete(root);
-        return send_json_response(req, NULL);
+    return send_json_response(req, status);
+}
+
+static esp_err_t deauth_detect_start_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
     }
-    for (int i = 0; i < status->count; i++) {
-        if (status->entries[i].alerting) {
-            cJSON *alert = cJSON_CreateObject();
-            if (alert == NULL) {
-                cJSON_Delete(root);
-                return send_json_response(req, NULL);
-            }
-            char bssid_str[18];
-            snprintf(bssid_str, sizeof(bssid_str), MACSTR, MAC2STR(status->entries[i].bssid));
-            cJSON_AddStringToObject(alert, "bssid", bssid_str);
-            cJSON_AddNumberToObject(alert, "count", status->entries[i].count);
-            cJSON_AddItemToArray(alerts, alert);
-        }
+
+    ESP_LOGI(TAG, "Starting Deauth Detector");
+    deauth_detector_start();
+    return send_success_response(req);
+}
+
+static esp_err_t deauth_detect_stop_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
     }
-    cJSON_AddItemToObject(root, "alerts", alerts);
-    return send_json_response(req, root);
+
+    ESP_LOGI(TAG, "Stopping Deauth Detector");
+    deauth_detector_stop();
+    return send_success_response(req);
 }
 
 static esp_err_t stop_all_handler(httpd_req_t *req) {
@@ -1330,13 +1673,14 @@ static esp_err_t stop_all_handler(httpd_req_t *req) {
 
     attack_timer_active = false;
     stop_deauth_attack();
+    deauth_detector_stop();
     attack_beacon_spam_stop();
     attack_dos_stop();
     attack_handshake_stop();
     attack_pmkid_stop();
     attack_probe_stop();
     attack_bt_spam_stop();
-    attack_method_evil_twin_stop();
+    attack_eviltwin_stop();
     ble_deauth_stop();
     ble_connect_flood_stop();
     ble_l2cap_stop();
@@ -1358,6 +1702,7 @@ void start_web_server(void) {
     config.lru_purge_enable = true;
     config.max_uri_handlers = 64;
     config.recv_wait_timeout = 10;
+    config.stack_size = 16384;
     
     if (httpd_start(&server, &config) == ESP_OK) {
         server_handle = server;
@@ -1365,8 +1710,8 @@ void start_web_server(void) {
         /* Core routes */
         httpd_uri_t root = { .uri = "/", .method = HTTP_GET, .handler = root_handler };
         httpd_register_uri_handler(server, &root);
-        httpd_uri_t login = { .uri = "/login", .method = HTTP_GET, .handler = login_handler };
-        httpd_register_uri_handler(server, &login);
+        httpd_uri_t login_get = { .uri = "/login", .method = HTTP_GET, .handler = login_handler };
+        httpd_register_uri_handler(server, &login_get);
         httpd_uri_t login_post = { .uri = "/login", .method = HTTP_POST, .handler = login_post_handler };
         httpd_register_uri_handler(server, &login_post);
         httpd_uri_t dashboard = { .uri = "/dashboard", .method = HTTP_GET, .handler = dashboard_handler };
@@ -1391,20 +1736,68 @@ void start_web_server(void) {
         httpd_register_uri_handler(server, &status);
         httpd_uri_t detector = { .uri = "/api/detector", .method = HTTP_GET, .handler = detector_api_handler };
         httpd_register_uri_handler(server, &detector);
+        httpd_uri_t deauth_detect_start = { .uri = "/api/deauth-detect/start", .method = HTTP_POST, .handler = deauth_detect_start_handler };
+        httpd_register_uri_handler(server, &deauth_detect_start);
+        httpd_uri_t deauth_detect_stop = { .uri = "/api/deauth-detect/stop", .method = HTTP_POST, .handler = deauth_detect_stop_handler };
+        httpd_register_uri_handler(server, &deauth_detect_stop);
+        httpd_uri_t deauth_detect_status = { .uri = "/api/deauth-detect/status", .method = HTTP_GET, .handler = detector_api_handler };
+        httpd_register_uri_handler(server, &deauth_detect_status);
         httpd_uri_t beacon_start = { .uri = "/api/beacon/start", .method = HTTP_POST, .handler = beacon_start_handler };
         httpd_register_uri_handler(server, &beacon_start);
         httpd_uri_t beacon_stop = { .uri = "/api/beacon/stop", .method = HTTP_POST, .handler = beacon_stop_handler };
         httpd_register_uri_handler(server, &beacon_stop);
+        httpd_uri_t beacon_status = { .uri = "/api/beacon/status", .method = HTTP_GET, .handler = beacon_status_handler };
+        httpd_register_uri_handler(server, &beacon_status);
         httpd_uri_t dos_start = { .uri = "/api/dos/start", .method = HTTP_POST, .handler = dos_start_handler };
         httpd_register_uri_handler(server, &dos_start);
-        httpd_uri_t handshake_start = { .uri = "/api/handshake/start", .method = HTTP_POST, .handler = handshake_start_handler };
-        httpd_register_uri_handler(server, &handshake_start);
-        httpd_uri_t pmkid_start = { .uri = "/api/pmkid/start", .method = HTTP_POST, .handler = pmkid_start_handler };
-        httpd_register_uri_handler(server, &pmkid_start);
+        httpd_uri_t dos_stop = { .uri = "/api/dos/stop", .method = HTTP_POST, .handler = dos_stop_handler };
+        httpd_register_uri_handler(server, &dos_stop);
+        httpd_uri_t dos_status = { .uri = "/api/dos/status", .method = HTTP_GET, .handler = dos_status_handler };
+        httpd_register_uri_handler(server, &dos_status);
+
+        /* Handshake API */
+        httpd_uri_t handshake_start_uri = { .uri = "/api/handshake/start", .method = HTTP_POST, .handler = handshake_start_handler };
+        httpd_register_uri_handler(server, &handshake_start_uri);
+        httpd_uri_t handshake_stop_uri = { .uri = "/api/handshake/stop", .method = HTTP_POST, .handler = handshake_stop_handler };
+        httpd_register_uri_handler(server, &handshake_stop_uri);
+        httpd_uri_t handshake_status_uri = { .uri = "/api/handshake/status", .method = HTTP_GET, .handler = handshake_status_handler };
+        httpd_register_uri_handler(server, &handshake_status_uri);
+        httpd_uri_t handshake_pcap_uri = { .uri = "/api/handshake/pcap", .method = HTTP_GET, .handler = handshake_pcap_handler };
+        httpd_register_uri_handler(server, &handshake_pcap_uri);
+
+        /* PMKID API */
+        httpd_uri_t pmkid_start_uri = { .uri = "/api/pmkid/start", .method = HTTP_POST, .handler = pmkid_start_handler };
+        httpd_register_uri_handler(server, &pmkid_start_uri);
+        httpd_uri_t pmkid_stop_uri = { .uri = "/api/pmkid/stop", .method = HTTP_POST, .handler = pmkid_stop_handler };
+        httpd_register_uri_handler(server, &pmkid_stop_uri);
+        httpd_uri_t pmkid_status_uri = { .uri = "/api/pmkid/status", .method = HTTP_GET, .handler = pmkid_status_handler };
+        httpd_register_uri_handler(server, &pmkid_status_uri);
+        httpd_uri_t pmkid_hash_uri = { .uri = "/api/pmkid/hash", .method = HTTP_GET, .handler = pmkid_hash_handler };
+        httpd_register_uri_handler(server, &pmkid_hash_uri);
+
+        /* Probe Sniffer API */
         httpd_uri_t probe_start = { .uri = "/api/probe/start", .method = HTTP_POST, .handler = probe_start_handler };
         httpd_register_uri_handler(server, &probe_start);
+        httpd_uri_t probe_stop = { .uri = "/api/probe/stop", .method = HTTP_POST, .handler = probe_stop_handler };
+        httpd_register_uri_handler(server, &probe_stop);
+        httpd_uri_t probe_status = { .uri = "/api/probe/status", .method = HTTP_GET, .handler = probe_status_handler };
+        httpd_register_uri_handler(server, &probe_status);
+        httpd_uri_t probe_ghosts = { .uri = "/api/probe/ghosts", .method = HTTP_GET, .handler = probe_ghosts_handler };
+        httpd_register_uri_handler(server, &probe_ghosts);
+        httpd_uri_t probe_clear = { .uri = "/api/probe/clear", .method = HTTP_POST, .handler = probe_clear_handler };
+        httpd_register_uri_handler(server, &probe_clear);
+
+        /* Evil Twin API */
         httpd_uri_t eviltwin_start = { .uri = "/api/eviltwin/start", .method = HTTP_POST, .handler = eviltwin_start_handler };
         httpd_register_uri_handler(server, &eviltwin_start);
+        httpd_uri_t eviltwin_stop = { .uri = "/api/eviltwin/stop", .method = HTTP_POST, .handler = eviltwin_stop_handler };
+        httpd_register_uri_handler(server, &eviltwin_stop);
+        httpd_uri_t eviltwin_status = { .uri = "/api/eviltwin/status", .method = HTTP_GET, .handler = eviltwin_status_handler };
+        httpd_register_uri_handler(server, &eviltwin_status);
+        httpd_uri_t eviltwin_passwords = { .uri = "/api/eviltwin/passwords", .method = HTTP_GET, .handler = eviltwin_passwords_handler };
+        httpd_register_uri_handler(server, &eviltwin_passwords);
+        httpd_uri_t eviltwin_clear = { .uri = "/api/eviltwin/clear", .method = HTTP_POST, .handler = eviltwin_clear_handler };
+        httpd_register_uri_handler(server, &eviltwin_clear);
 
         /* BLE API */
         httpd_uri_t ble_scan_uri = { .uri = "/api/ble/scan", .method = HTTP_GET, .handler = ble_scan_api_handler };
@@ -1463,10 +1856,10 @@ void start_web_server(void) {
         httpd_register_uri_handler(server, &stop_all);
         
         ESP_LOGI(TAG, "==========================================");
-        ESP_LOGI(TAG, "Omega Solutions - Complete Security Suite v5.0");
+        ESP_LOGI(TAG, "Omega Solutions - Complete Security Suite v5.1");
         ESP_LOGI(TAG, "Web server started! Open http://192.168.4.1");
         ESP_LOGI(TAG, "Username: omega | Password: solutions123");
-        ESP_LOGI(TAG, "WiFi: Deauth, Beacon, DoS, Handshake, PMKID, Probe, EvilTwin");
+        ESP_LOGI(TAG, "WiFi: Deauth, Deauth Detect, Beacon, DoS, Handshake, PMKID, Probe, EvilTwin");
         ESP_LOGI(TAG, "BLE: Spam, Scan, Spoof, Clone, Connect, L2CAP, GATT, Deauth, Passkey, Takeover");
         ESP_LOGI(TAG, "==========================================");
     }

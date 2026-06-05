@@ -182,7 +182,7 @@ static void attack_reset_handler(void *args, esp_event_base_t event_base, int32_
     attack_dos_stop();
     attack_beacon_spam_stop();
     attack_probe_stop();
-    attack_method_evil_twin_stop();
+    attack_eviltwin_stop();
     attack_method_super_clone_stop();
     wifictl_mgmt_ap_start();
     wifictl_restore_ap_mac();

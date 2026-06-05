@@ -57,6 +57,7 @@ void app_main(void) {
     deauth_attack_init();
     deauth_detector_start();
     attack_init();
+    attack_eviltwin_init();
 
     /* ---- BLE: Attack modules ---- */
     attack_bt_spam_init();
