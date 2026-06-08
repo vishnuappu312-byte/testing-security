@@ -1669,15 +1669,67 @@ static esp_err_t ble_takeover_start_handler(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
         return ESP_FAIL;
     }
-    char content[200];
+    char content[512];
     int ret = httpd_req_recv(req, content, sizeof(content) - 1);
     if (ret <= 0) return ESP_FAIL;
     content[ret] = '\0';
     cJSON *root = cJSON_Parse(content);
     if (!root) return ESP_FAIL;
-    cJSON *addr = cJSON_GetObjectItem(root, "addr");
-    const char *saddr = cJSON_IsString(addr) ? addr->valuestring : NULL;
-    ble_takeover_start(saddr);
+
+    cJSON *addr_json = cJSON_GetObjectItem(root, "addr");
+    if (!cJSON_IsString(addr_json) || addr_json->valuestring == NULL) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing addr");
+        return ESP_FAIL;
+    }
+
+    ble_takeover_config_t cfg = {
+        .target_addr              = "",
+        .timeout_sec              = 300,
+        .connect_timeout_ms       = 15000,
+        .auto_enable_notifies     = true,
+        .rotate_own_mac           = true,
+        .addr_type                = BLE_TAKEOVER_ADDR_AUTO,
+        .scan_itvl                = 0x0010,
+        .scan_window              = 0x0010,
+        .conn_itvl_min            = 0x0006,
+        .conn_itvl_max            = 0x000C,
+        .conn_latency             = 0,
+        .conn_supervision_timeout = 0x0064,
+    };
+    strncpy(cfg.target_addr, addr_json->valuestring, sizeof(cfg.target_addr) - 1);
+
+    cJSON *timeout_json     = cJSON_GetObjectItem(root, "timeout_sec");
+    cJSON *conn_to_json     = cJSON_GetObjectItem(root, "connect_timeout_ms");
+    cJSON *addr_type_json   = cJSON_GetObjectItem(root, "addr_type");
+    cJSON *auto_notif_json  = cJSON_GetObjectItem(root, "auto_enable_notifies");
+    cJSON *rotate_mac_json  = cJSON_GetObjectItem(root, "rotate_own_mac");
+
+    if (cJSON_IsNumber(timeout_json) && timeout_json->valueint >= 10) {
+        cfg.timeout_sec = (uint32_t)timeout_json->valueint;
+    }
+    if (cJSON_IsNumber(conn_to_json) && conn_to_json->valueint >= 1000) {
+        cfg.connect_timeout_ms = (uint32_t)conn_to_json->valueint;
+    }
+    if (cJSON_IsNumber(addr_type_json)) {
+        int at = addr_type_json->valueint;
+        if (at >= 0 && at <= 2) {
+            cfg.addr_type = (takeover_addr_type_t)at;
+        }
+    }
+    if (cJSON_IsBool(auto_notif_json)) {
+        cfg.auto_enable_notifies = auto_notif_json->valueint ? true : false;
+    }
+    if (cJSON_IsBool(rotate_mac_json)) {
+        cfg.rotate_own_mac = rotate_mac_json->valueint ? true : false;
+    }
+
+    ble_takeover_init();
+    ble_takeover_start_config(&cfg);
+
+    ESP_LOGI(TAG, "Starting BLE takeover on %s (timeout=%us, addr_type=%d)",
+             cfg.target_addr, (unsigned)cfg.timeout_sec, (int)cfg.addr_type);
+
     cJSON_Delete(root);
     return send_success_response(req);
 }
@@ -1696,9 +1748,8 @@ static esp_err_t ble_takeover_status_handler(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
         return ESP_FAIL;
     }
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, ble_takeover_get_status());
-    return ESP_OK;
+    cJSON *status = ble_takeover_get_status_json();
+    return send_json_response(req, status);
 }
 
 static esp_err_t ble_takeover_services_handler(httpd_req_t *req) {
@@ -1876,6 +1927,10 @@ static esp_err_t status_api_handler(httpd_req_t *req) {
     }
     if (ble_takeover_is_running()) {
         cJSON_AddStringToObject(response, "ble_takeover", "BLE device takeover active");
+        cJSON_AddStringToObject(response, "ble_takeover_state", ble_takeover_get_state_str());
+        cJSON_AddNumberToObject(response, "ble_takeover_services", ble_takeover_get_svc_count());
+        cJSON_AddNumberToObject(response, "ble_takeover_chars", ble_takeover_get_chr_count());
+        cJSON_AddNumberToObject(response, "ble_takeover_remaining", ble_takeover_get_remaining_sec());
     }
     if (attack_pmkid_is_running()) {
         cJSON_AddStringToObject(response, "pmkid", "PMKID capture active");
