@@ -1337,15 +1337,57 @@ static esp_err_t ble_l2cap_start_handler(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
         return ESP_FAIL;
     }
-    char content[200];
+    char content[400];
     int ret = httpd_req_recv(req, content, sizeof(content) - 1);
     if (ret <= 0) return ESP_FAIL;
     content[ret] = '\0';
     cJSON *root = cJSON_Parse(content);
     if (!root) return ESP_FAIL;
-    cJSON *addr = cJSON_GetObjectItem(root, "addr");
-    const char *saddr = cJSON_IsString(addr) ? addr->valuestring : NULL;
-    ble_l2cap_start(saddr);
+
+    cJSON *addr_json              = cJSON_GetObjectItem(root, "addr");
+    cJSON *addr_type_json         = cJSON_GetObjectItem(root, "addr_type");
+    cJSON *burst_json             = cJSON_GetObjectItem(root, "signal_burst_count");
+    cJSON *signal_interval_json   = cJSON_GetObjectItem(root, "signal_interval_ms");
+    cJSON *post_disconnect_json   = cJSON_GetObjectItem(root, "post_disconnect_ms");
+    cJSON *backoff_json           = cJSON_GetObjectItem(root, "fail_backoff_ms");
+    cJSON *timeout_json           = cJSON_GetObjectItem(root, "timeout_sec");
+    cJSON *rotate_mac_json        = cJSON_GetObjectItem(root, "rotate_own_mac");
+
+    const char *saddr = cJSON_IsString(addr_json) ? addr_json->valuestring : NULL;
+
+    ble_l2cap_flood_config_t cfg = {0};
+    if (saddr) {
+        strncpy(cfg.target_addr, saddr, sizeof(cfg.target_addr) - 1);
+        cfg.target_addr[sizeof(cfg.target_addr) - 1] = '\0';
+    }
+
+    cfg.addr_type = cJSON_IsNumber(addr_type_json)
+        ? (ble_l2cap_flood_addr_type_t)addr_type_json->valueint
+        : BLE_L2CAP_ADDR_AUTO;
+    if (cfg.addr_type > BLE_L2CAP_ADDR_AUTO) cfg.addr_type = BLE_L2CAP_ADDR_AUTO;
+
+    cfg.signal_burst_count  = cJSON_IsNumber(burst_json)
+        ? (uint32_t)burst_json->valueint : 50;
+    cfg.signal_interval_ms  = cJSON_IsNumber(signal_interval_json)
+        ? (uint32_t)signal_interval_json->valueint : 10;
+    cfg.post_disconnect_ms  = cJSON_IsNumber(post_disconnect_json)
+        ? (uint32_t)post_disconnect_json->valueint : 500;
+    cfg.fail_backoff_ms     = cJSON_IsNumber(backoff_json)
+        ? (uint32_t)backoff_json->valueint : 2000;
+    cfg.timeout_sec         = cJSON_IsNumber(timeout_json)
+        ? (uint32_t)timeout_json->valueint : 300;
+    cfg.rotate_own_mac      = cJSON_IsBool(rotate_mac_json)
+        ? (bool)rotate_mac_json->valueint : true;
+
+    ble_l2cap_flood_init();
+    ble_l2cap_flood_start_config(&cfg);
+
+    ESP_LOGI(TAG, "BLE L2CAP flood started: target=%s addr_type=%d burst=%u interval=%u post_dis=%u backoff=%u timeout=%u rotate=%d",
+             cfg.target_addr, cfg.addr_type,
+             (unsigned)cfg.signal_burst_count, (unsigned)cfg.signal_interval_ms,
+             (unsigned)cfg.post_disconnect_ms, (unsigned)cfg.fail_backoff_ms,
+             (unsigned)cfg.timeout_sec, cfg.rotate_own_mac);
+
     cJSON_Delete(root);
     return send_success_response(req);
 }
@@ -1355,8 +1397,17 @@ static esp_err_t ble_l2cap_stop_handler(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
         return ESP_FAIL;
     }
-    ble_l2cap_stop();
+    ble_l2cap_flood_stop();
     return send_success_response(req);
+}
+
+static esp_err_t ble_l2cap_status_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    cJSON *status = ble_l2cap_flood_get_status_json();
+    return send_json_response(req, status);
 }
 
 static esp_err_t ble_gatt_start_handler(httpd_req_t *req) {
@@ -1364,15 +1415,45 @@ static esp_err_t ble_gatt_start_handler(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
         return ESP_FAIL;
     }
-    char content[200];
+    char content[512];
     int ret = httpd_req_recv(req, content, sizeof(content) - 1);
     if (ret <= 0) return ESP_FAIL;
     content[ret] = '\0';
     cJSON *root = cJSON_Parse(content);
     if (!root) return ESP_FAIL;
-    cJSON *addr = cJSON_GetObjectItem(root, "addr");
-    const char *saddr = cJSON_IsString(addr) ? addr->valuestring : NULL;
-    ble_gatt_probe_start(saddr);
+
+    cJSON *addr_json            = cJSON_GetObjectItem(root, "addr");
+    cJSON *timeout_json         = cJSON_GetObjectItem(root, "timeout_sec");
+    cJSON *probe_read_json      = cJSON_GetObjectItem(root, "probe_read");
+    cJSON *probe_write_json     = cJSON_GetObjectItem(root, "probe_write");
+    cJSON *probe_subscribe_json = cJSON_GetObjectItem(root, "probe_subscribe");
+    cJSON *probe_interval_json  = cJSON_GetObjectItem(root, "probe_interval_ms");
+    cJSON *post_disconnect_json = cJSON_GetObjectItem(root, "post_disconnect_ms");
+    cJSON *fail_backoff_json    = cJSON_GetObjectItem(root, "fail_backoff_ms");
+    cJSON *addr_type_json       = cJSON_GetObjectItem(root, "addr_type");
+    cJSON *rotate_mac_json      = cJSON_GetObjectItem(root, "rotate_own_mac");
+
+    gatt_probe_config_t cfg = {0};
+    if (cJSON_IsString(addr_json) && addr_json->valuestring != NULL) {
+        strncpy(cfg.target_addr, addr_json->valuestring, sizeof(cfg.target_addr) - 1);
+    }
+    cfg.timeout_sec        = cJSON_IsNumber(timeout_json)         ? (uint32_t)timeout_json->valueint         : 300;
+    cfg.probe_read         = cJSON_IsBool(probe_read_json)        ? probe_read_json->valueint                : true;
+    cfg.probe_write        = cJSON_IsBool(probe_write_json)       ? probe_write_json->valueint               : false;
+    cfg.probe_subscribe    = cJSON_IsBool(probe_subscribe_json)   ? probe_subscribe_json->valueint           : true;
+    cfg.probe_interval_ms  = cJSON_IsNumber(probe_interval_json)  ? (uint32_t)probe_interval_json->valueint  : 50;
+    cfg.post_disconnect_ms = cJSON_IsNumber(post_disconnect_json) ? (uint32_t)post_disconnect_json->valueint : 500;
+    cfg.fail_backoff_ms    = cJSON_IsNumber(fail_backoff_json)    ? (uint32_t)fail_backoff_json->valueint    : 2000;
+    cfg.addr_type          = cJSON_IsNumber(addr_type_json)       ? (gatt_probe_addr_type_t)addr_type_json->valueint : BLE_GATT_PROBE_ADDR_AUTO;
+    cfg.rotate_own_mac     = cJSON_IsBool(rotate_mac_json)        ? rotate_mac_json->valueint                : true;
+
+    ESP_LOGI(TAG, "Starting GATT probe on %s (read=%d write=%d sub=%d timeout=%us)",
+             cfg.target_addr, cfg.probe_read, cfg.probe_write,
+             cfg.probe_subscribe, (unsigned)cfg.timeout_sec);
+
+    ble_gatt_probe_init();
+    ble_gatt_probe_start_config(&cfg);
+
     cJSON_Delete(root);
     return send_success_response(req);
 }
@@ -1384,6 +1465,15 @@ static esp_err_t ble_gatt_stop_handler(httpd_req_t *req) {
     }
     ble_gatt_probe_stop();
     return send_success_response(req);
+}
+
+static esp_err_t ble_gatt_status_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    cJSON *status = ble_gatt_probe_get_status_json();
+    return send_json_response(req, status);
 }
 
 static esp_err_t ble_deauth_start_handler(httpd_req_t *req) {
@@ -1641,7 +1731,7 @@ static esp_err_t status_api_handler(httpd_req_t *req) {
     cJSON_AddBoolToObject(response, "ble_running", attack_bt_spam_is_running());
     cJSON_AddBoolToObject(response, "ble_deauth_running", ble_deauth_is_running());
     cJSON_AddBoolToObject(response, "ble_connect_running", ble_connect_flood_is_running());
-    cJSON_AddBoolToObject(response, "ble_l2cap_running", ble_l2cap_is_running());
+    cJSON_AddBoolToObject(response, "ble_l2cap_running", ble_l2cap_flood_is_running());
     cJSON_AddBoolToObject(response, "ble_spoof_running", ble_spoof_is_running());
     cJSON_AddBoolToObject(response, "ble_passkey_running", ble_passkey_is_running());
     cJSON_AddBoolToObject(response, "ble_takeover_running", ble_takeover_is_running());
@@ -1668,6 +1758,12 @@ static esp_err_t status_api_handler(httpd_req_t *req) {
     }
     if (ble_deauth_is_running()) {
         cJSON_AddStringToObject(response, "ble_deauth", "BLE deauth active");
+    }
+    if (ble_connect_flood_is_running()) {
+        cJSON_AddStringToObject(response, "ble_connect", "BLE connect flood active");
+    }
+    if (ble_l2cap_flood_is_running()) {
+        cJSON_AddStringToObject(response, "ble_l2cap", "BLE L2CAP flood active");
     }
     if (ble_spoof_is_running()) {
         const char *mode_str = (ble_spoof_get_mode() == BLE_SPOOF_MODE_CLONE) 
@@ -1772,7 +1868,7 @@ static esp_err_t stop_all_handler(httpd_req_t *req) {
     attack_eviltwin_stop();
     ble_deauth_stop();
     ble_connect_flood_stop();
-    ble_l2cap_stop();
+    ble_l2cap_flood_stop();
     ble_gatt_probe_stop();
     ble_spoof_stop();
     ble_passkey_stop();
@@ -1789,7 +1885,7 @@ void start_web_server(void) {
     httpd_handle_t server = NULL;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.lru_purge_enable = true;
-    config.max_uri_handlers = 64;
+    config.max_uri_handlers = 256;
     config.recv_wait_timeout = 10;
     config.stack_size = 16384;
     
@@ -1917,10 +2013,14 @@ void start_web_server(void) {
         httpd_register_uri_handler(server, &ble_l2cap_start_uri);
         httpd_uri_t ble_l2cap_stop_uri = { .uri = "/api/ble/l2cap/stop", .method = HTTP_POST, .handler = ble_l2cap_stop_handler };
         httpd_register_uri_handler(server, &ble_l2cap_stop_uri);
+        httpd_uri_t ble_l2cap_status_uri = { .uri = "/api/ble/l2cap/status", .method = HTTP_GET, .handler = ble_l2cap_status_handler };
+        httpd_register_uri_handler(server, &ble_l2cap_status_uri);
         httpd_uri_t ble_gatt_start_uri = { .uri = "/api/ble/gatt/start", .method = HTTP_POST, .handler = ble_gatt_start_handler };
         httpd_register_uri_handler(server, &ble_gatt_start_uri);
         httpd_uri_t ble_gatt_stop_uri = { .uri = "/api/ble/gatt/stop", .method = HTTP_POST, .handler = ble_gatt_stop_handler };
         httpd_register_uri_handler(server, &ble_gatt_stop_uri);
+        httpd_uri_t ble_gatt_status_uri = { .uri = "/api/ble/gatt/status", .method = HTTP_GET, .handler = ble_gatt_status_handler };
+        httpd_register_uri_handler(server, &ble_gatt_status_uri);
         httpd_uri_t ble_deauth_start_uri = { .uri = "/api/ble/deauth/start", .method = HTTP_POST, .handler = ble_deauth_start_handler };
         httpd_register_uri_handler(server, &ble_deauth_start_uri);
         httpd_uri_t ble_deauth_stop_uri = { .uri = "/api/ble/deauth/stop", .method = HTTP_POST, .handler = ble_deauth_stop_handler };
