@@ -1603,15 +1603,43 @@ static esp_err_t ble_passkey_start_handler(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
         return ESP_FAIL;
     }
-    char content[200];
+    char content[256];
     int ret = httpd_req_recv(req, content, sizeof(content) - 1);
     if (ret <= 0) return ESP_FAIL;
     content[ret] = '\0';
     cJSON *root = cJSON_Parse(content);
     if (!root) return ESP_FAIL;
-    cJSON *addr = cJSON_GetObjectItem(root, "addr");
-    const char *saddr = cJSON_IsString(addr) ? addr->valuestring : NULL;
-    ble_passkey_start(saddr);
+
+    cJSON *addr_json       = cJSON_GetObjectItem(root, "addr");
+    cJSON *timeout_json    = cJSON_GetObjectItem(root, "timeout_sec");
+    cJSON *autodisconn_json = cJSON_GetObjectItem(root, "auto_disconnect");
+
+    const char *addr_str = cJSON_IsString(addr_json) ? addr_json->valuestring : NULL;
+    if (!addr_str || strlen(addr_str) < 1) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing target BLE address");
+        return ESP_FAIL;
+    }
+
+    ble_passkey_config_t cfg = {
+        .timeout_sec      = 60,
+        .adv_duration_sec = 60,
+        .auto_disconnect  = true,
+    };
+    strncpy(cfg.target_addr, addr_str, sizeof(cfg.target_addr) - 1);
+    cfg.target_addr[sizeof(cfg.target_addr) - 1] = '\0';
+
+    if (cJSON_IsNumber(timeout_json) && timeout_json->valueint >= 10)
+        cfg.timeout_sec = (uint32_t)timeout_json->valueint;
+    if (cJSON_IsNumber(autodisconn_json))
+        cfg.auto_disconnect = autodisconn_json->valueint == 1;
+
+    ble_passkey_init();
+    ble_passkey_start_config(&cfg);
+
+    ESP_LOGI(TAG, "BLE passkey started: target=%s timeout=%u auto_disconnect=%d",
+             cfg.target_addr, (unsigned)cfg.timeout_sec, cfg.auto_disconnect);
+
     cJSON_Delete(root);
     return send_success_response(req);
 }
@@ -1630,9 +1658,8 @@ static esp_err_t ble_passkey_status_handler(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
         return ESP_FAIL;
     }
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, ble_passkey_get_info());
-    return ESP_OK;
+    cJSON *status = ble_passkey_get_status_json();
+    return send_json_response(req, status);
 }
 
 /* ---- BLE Takeover Handlers ---- */
@@ -1844,6 +1871,8 @@ static esp_err_t status_api_handler(httpd_req_t *req) {
     }
     if (ble_passkey_is_running()) {
         cJSON_AddStringToObject(response, "ble_passkey", "BLE passkey capture active");
+        cJSON_AddStringToObject(response, "ble_passkey_method", ble_passkey_get_method());
+        cJSON_AddNumberToObject(response, "ble_passkey_remaining", ble_passkey_get_remaining_sec());
     }
     if (ble_takeover_is_running()) {
         cJSON_AddStringToObject(response, "ble_takeover", "BLE device takeover active");
