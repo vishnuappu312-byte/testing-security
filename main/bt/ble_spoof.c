@@ -1,342 +1,13 @@
-// // /* BLE name/advert spoof module */
-// // #include "ble_spoof.h"
-// // #include "esp_log.h"
-// // #include "freertos/FreeRTOS.h"
-// // #include "freertos/task.h"
-// // #include "freertos/semphr.h"
-// // #include <string.h>
-
-// // /* NimBLE headers */
-// // #include "nimble/nimble_port.h"
-// // #include "host/ble_hs.h"
-// // #include "host/ble_gap.h"
-
-// // #include "ble_common.h"
-
-// // static const char *TAG = "ble_spoof";
-// // static bool running = false;
-// // static TaskHandle_t task_handle = NULL;
-// // static char current_name[128] = {0};
-// // static SemaphoreHandle_t mutex = NULL;
-
-// // static void build_adv_payload(const char *name, uint8_t *out, size_t *out_len) {
-// //     size_t n = name ? strlen(name) : 0;
-// //     if (n > 29) n = 29; // keep total adv <= 31
-// //     size_t idx = 0;
-// //     // Flags
-// //     out[idx++] = 2; // length
-// //     out[idx++] = 0x01; // Flags
-// //     out[idx++] = 0x06; // LE General Discoverable + BR/EDR not supported
-// //     if (n > 0) {
-// //         out[idx++] = (uint8_t)(n + 1);
-// //         out[idx++] = 0x09; // Complete Local Name
-// //         memcpy(&out[idx], name, n);
-// //         idx += n;
-// //     }
-// //     *out_len = idx;
-// // }
-
-// // static void spoof_task(void *arg) {
-// //     char names[5][64];
-// //     int name_count = 0;
-// //     int cur = 0;
-
-// //     xSemaphoreTake(mutex, portMAX_DELAY);
-// //     strncpy(names[0], current_name, sizeof(names[0])-1);
-// //     // parse comma-separated names up to 5
-// //     char *p = strchr(names[0], ',');
-// //     while (p && name_count < 4) {
-// //         // split
-// //         *p = '\0';
-// //         name_count++;
-// //         strncpy(names[name_count], p+1, sizeof(names[0])-1);
-// //         p = strchr(names[name_count], ',');
-// //     }
-// //     name_count++; // at least one
-// //     xSemaphoreGive(mutex);
-
-// //     ESP_LOGI(TAG, "Starting BLE spoof task with %d names", name_count);
-
-// //     while (running) {
-// //         xSemaphoreTake(mutex, portMAX_DELAY);
-// //         char sel[64] = {0};
-// //         strncpy(sel, names[cur % name_count], sizeof(sel)-1);
-// //         xSemaphoreGive(mutex);
-
-// //         uint8_t adv[31]; size_t adv_len = 0;
-// //         build_adv_payload(sel, adv, &adv_len);
-
-// //         int rc = ble_gap_adv_set_data(adv, adv_len);
-// //         if (rc) ESP_LOGE(TAG, "ble_gap_adv_set_data failed: %d", rc);
-
-// //         struct ble_gap_adv_params adv_params;
-// //         memset(&adv_params, 0, sizeof(adv_params));
-// //         adv_params.conn_mode = BLE_GAP_CONN_MODE_NON;
-// //         adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
-// //         adv_params.itvl_min = 0x20; adv_params.itvl_max = 0x28;
-
-// //         if (ble_gap_adv_active()) {
-// //             ble_gap_adv_stop();
-// //         }
-// //         uint8_t own_addr_type = ble_common_own_addr_type();
-// //         rc = ble_gap_adv_start(own_addr_type, NULL, 100, &adv_params, NULL, NULL);
-// //         if (rc) {
-// //             ESP_LOGE(TAG, "ble_gap_adv_start failed: %d", rc);
-// //         } else {
-// //             vTaskDelay(pdMS_TO_TICKS(200));
-// //             if (ble_gap_adv_active()) ble_gap_adv_stop();
-// //         }
-
-// //         cur++;
-// //         vTaskDelay(pdMS_TO_TICKS(500));
-// //     }
-
-// //     if (ble_gap_adv_active()) ble_gap_adv_stop();
-// //     task_handle = NULL;
-// //     vTaskDelete(NULL);
-// // }
-
-// // void ble_spoof_init(void) {
-// //     if (mutex == NULL) mutex = xSemaphoreCreateMutex();
-// //     ESP_LOGI(TAG, "ble_spoof initialized");
-// // }
-
-// // void ble_spoof_start(const char *name) {
-// //     if (running) return;
-// //     if (mutex == NULL) mutex = xSemaphoreCreateMutex();
-// //     xSemaphoreTake(mutex, portMAX_DELAY);
-// //     strncpy(current_name, name ? name : "", sizeof(current_name)-1);
-// //     xSemaphoreGive(mutex);
-// //     running = true;
-// //     xTaskCreate(spoof_task, "ble_spoof", 4096, NULL, 5, &task_handle);
-// // }
-
-// // void ble_spoof_stop(void) {
-// //     if (!running) return;
-// //     running = false;
-// //     vTaskDelay(pdMS_TO_TICKS(300));
-// // }
-
-// // bool ble_spoof_is_running(void) { return running; }
-// /* BLE name/advert spoof module */
-// #include "ble_spoof.h"
-// #include "esp_log.h"
-// #include "freertos/FreeRTOS.h"
-// #include "freertos/task.h"
-// #include "freertos/semphr.h"
-// #include <string.h>
-
-// /* NimBLE headers */
-// #include "nimble/nimble_port.h"
-// #include "host/ble_hs.h"
-// #include "host/ble_gap.h"
-
-// #include "ble_common.h"
-
-// static const char *TAG = "ble_spoof";
-// static bool running = false;
-// static TaskHandle_t task_handle = NULL;
-// static char current_name[128] = {0};
-// static SemaphoreHandle_t mutex = NULL;
-// static SemaphoreHandle_t task_exit_sem = NULL;
-
-// static void build_adv_payload(const char *name, uint8_t *out, size_t *out_len) {
-//     size_t n = name ? strlen(name) : 0;
-//     if (n > 29) n = 29; /* keep total adv <= 31 */
-//     size_t idx = 0;
-//     /* Flags */
-//     out[idx++] = 2;    /* length */
-//     out[idx++] = 0x01; /* Flags */
-//     out[idx++] = 0x06; /* LE General Discoverable + BR/EDR not supported */
-//     if (n > 0) {
-//         out[idx++] = (uint8_t)(n + 1);
-//         out[idx++] = 0x09; /* Complete Local Name */
-//         memcpy(&out[idx], name, n);
-//         idx += n;
-//     }
-//     *out_len = idx;
-// }
-
-// /* FIX: Rotate random MAC each cycle so target can't filter us */
-// static void set_random_mac(void) {
-//     uint8_t mac[6];
-//     esp_fill_random(mac, 6);
-//     mac[5] |= 0xC0;  /* Random static address */
-//     int rc = ble_hs_id_set_rnd(mac);
-//     if (rc != 0) {
-//         ESP_LOGW(TAG, "set_random_mac failed: %d", rc);
-//     }
-// }
-
-// /* FIX: Proper advertising event callback */
-// static int adv_event_cb(struct ble_gap_event *event, void *arg) {
-//     (void)arg;
-//     switch (event->type) {
-//         case BLE_GAP_EVENT_ADV_COMPLETE:
-//             ESP_LOGD(TAG, "Advertising duration completed");
-//             break;
-//         default:
-//             break;
-//     }
-//     return 0;
-// }
-
-// static void spoof_task(void *arg) {
-//     char names[5][64];
-//     int name_count = 0;
-//     int cur = 0;
-
-//     xSemaphoreTake(mutex, portMAX_DELAY);
-//     strncpy(names[0], current_name, sizeof(names[0]) - 1);
-//     names[0][sizeof(names[0]) - 1] = '\0';
-
-//     /* Parse comma-separated names up to 5 */
-//     char *p = strchr(names[0], ',');
-//     while (p && name_count < 4) {
-//         *p = '\0';
-//         name_count++;
-//         strncpy(names[name_count], p + 1, sizeof(names[0]) - 1);
-//         names[name_count][sizeof(names[0]) - 1] = '\0';  /* FIX: null terminate */
-//         p = strchr(names[name_count], ',');
-//     }
-//     name_count++; /* at least one */
-//     xSemaphoreGive(mutex);
-
-//     ESP_LOGI(TAG, "Starting BLE spoof task with %d names", name_count);
-
-//     while (running) {
-//         /* FIX: Yield to other BLE operations (scanning/connecting).
-//          * NimBLE controller can only run ONE GAP procedure at a time. */
-//         if (ble_gap_conn_active() || ble_gap_disc_active()) {
-//             vTaskDelay(pdMS_TO_TICKS(100));
-//             continue;
-//         }
-
-//         if (ble_gap_adv_active()) {
-//             ble_gap_adv_stop();
-//             vTaskDelay(pdMS_TO_TICKS(20));
-//         }
-
-//         /* FIX: Rotate MAC address each cycle */
-//         set_random_mac();
-//         vTaskDelay(pdMS_TO_TICKS(10));
-
-//         xSemaphoreTake(mutex, portMAX_DELAY);
-//         char sel[64] = {0};
-//         strncpy(sel, names[cur % name_count], sizeof(sel) - 1);
-//         sel[sizeof(sel) - 1] = '\0';
-//         xSemaphoreGive(mutex);
-
-//         uint8_t adv[31];
-//         size_t adv_len = 0;
-//         build_adv_payload(sel, adv, &adv_len);
-
-//         int rc = ble_gap_adv_set_data(adv, adv_len);
-//         if (rc) {
-//             ESP_LOGE(TAG, "ble_gap_adv_set_data failed: %d", rc);
-//             vTaskDelay(pdMS_TO_TICKS(50));
-//             continue;
-//         }
-
-//         struct ble_gap_adv_params adv_params;
-//         memset(&adv_params, 0, sizeof(adv_params));
-//         adv_params.conn_mode = BLE_GAP_CONN_MODE_NON;
-//         adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
-//         adv_params.itvl_min = 0x20;
-//         adv_params.itvl_max = 0x28;
-
-//         /* FIX: Use random address + advertising callback */
-//         rc = ble_gap_adv_start(BLE_OWN_ADDR_RANDOM, NULL, 200,
-//                                &adv_params, adv_event_cb, NULL);
-//         if (rc) {
-//             ESP_LOGE(TAG, "ble_gap_adv_start failed: %d", rc);
-//         } else {
-//             vTaskDelay(pdMS_TO_TICKS(200));
-//             if (ble_gap_adv_active()) ble_gap_adv_stop();
-//         }
-
-//         cur++;
-//         vTaskDelay(pdMS_TO_TICKS(500));
-//     }
-
-//     if (ble_gap_adv_active()) ble_gap_adv_stop();
-
-//     ESP_LOGI(TAG, "BLE spoof task exiting");
-//     task_handle = NULL;
-//     if (task_exit_sem) xSemaphoreGive(task_exit_sem);
-//     vTaskDelete(NULL);
-// }
-
-// void ble_spoof_init(void) {
-//     if (mutex == NULL) mutex = xSemaphoreCreateMutex();
-//     if (task_exit_sem == NULL) task_exit_sem = xSemaphoreCreateBinary();
-
-//     /* FIX: Ensure NimBLE is initialized */
-//     ble_common_init();
-
-//     ESP_LOGI(TAG, "ble_spoof initialized");
-// }
-
-// void ble_spoof_start(const char *name) {
-//     if (running) return;
-//     if (mutex == NULL) mutex = xSemaphoreCreateMutex();
-
-//     xSemaphoreTake(mutex, portMAX_DELAY);
-//     strncpy(current_name, name ? name : "", sizeof(current_name) - 1);
-//     current_name[sizeof(current_name) - 1] = '\0';
-//     xSemaphoreGive(mutex);
-
-//     running = true;
-
-//     if (task_exit_sem != NULL) {
-//         xSemaphoreTake(task_exit_sem, 0);  /* Clear any previous signal */
-//     }
-
-//     BaseType_t ret = xTaskCreate(spoof_task, "ble_spoof", 4096, NULL, 5, &task_handle);
-//     if (ret != pdPASS) {
-//         ESP_LOGE(TAG, "Failed to create spoof task");
-//         running = false;
-//     }
-// }
-
-// void ble_spoof_stop(void) {
-//     if (!running) return;
-//     running = false;
-
-//     /* FIX: Wait for the task to actually exit */
-//     if (task_exit_sem != NULL) {
-//         if (xSemaphoreTake(task_exit_sem, pdMS_TO_TICKS(5000)) != pdTRUE) {
-//             ESP_LOGW(TAG, "Task exit timeout, forcing delete");
-//             if (task_handle != NULL) {
-//                 vTaskDelete(task_handle);
-//                 task_handle = NULL;
-//             }
-//         }
-//     } else {
-//         vTaskDelay(pdMS_TO_TICKS(1000));
-//         if (task_handle != NULL) {
-//             vTaskDelete(task_handle);
-//             task_handle = NULL;
-//         }
-//     }
-
-//     ESP_LOGI(TAG, "BLE spoof stopped");
-// }
-
-// bool ble_spoof_is_running(void) {
-//     return running;
-// }
-
 /*
  * ble_spoof.c - BLE Name Spoof & Device Clone Implementation
  *
  * Two operational modes:
  *
- *   NAME-SPOOF  (legacy) – Rotate through comma-separated BLE device names.
+ *   NAME-SPOOF  (legacy) - Rotate through comma-separated BLE device names.
  *   Each cycle changes the advertised name and random MAC so that nearby
  *   scanners see a sequence of different devices.
  *
- *   CLONE       (new)    – Clone a scanned device's full advertising payload
+ *   CLONE       (new)    - Clone a scanned device's full advertising payload
  *   including services, appearance, TX power, manufacturer-specific data,
  *   and flags.  The ESP32 re-broadcasts this payload with a rotating random
  *   MAC, effectively impersonating the target device at the link-layer level.
@@ -349,17 +20,28 @@
  *   task therefore yields whenever another procedure (scan / connect) is
  *   active, preventing BLE_GAP_ERR_*_COMMAND_DISALLOWED errors.
  *
+ * Thread safety:
+ *   - `running` is volatile bool: set from stop()/timer, read in task loop
+ *   - `packet_count` is volatile uint32_t: incremented in task, read from
+ *     webserver context (atomic on 32-bit Xtensa)
+ *   - `current_names` and `clone_profile` protected by mutex
+ *   - `timeout_fired`, `last_error` are volatile for cross-task visibility
+ *
  * Dependencies:
  *   - ble_common.h  (nimble_port_init + own_addr_type helper)
  *   - NimBLE stack  (host + controller)
  *   - FreeRTOS
+ *   - cJSON
+ *   - esp_timer
  */
 
 #include "ble_spoof.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "cJSON.h"
 #include <string.h>
 
 /* NimBLE headers */
@@ -369,9 +51,9 @@
 
 #include "ble_common.h"
 
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
 /*  Constants                                                          */
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
 
 static const char *TAG = "ble_spoof";
 
@@ -380,49 +62,118 @@ static const char *TAG = "ble_spoof";
 #define ADV_MAX_LEN        31      /* BLE adv payload max              */
 #define TASK_STACK_SIZE    4096
 #define TASK_PRIORITY      5
-#define ADV_INTERVAL_MIN   0x0020  /* 20 ms */
-#define ADV_INTERVAL_MAX   0x0028  /* 25 ms */
 #define ADV_DURATION_MS    200     /* per-cycle broadcast window       */
-#define CYCLE_DELAY_MS     500     /* pause between cycles             */
+#define DEFAULT_ADV_INT_MS 100
+#define DEFAULT_CYCLE_MS   500
+#define DEFAULT_TIMEOUT_S  300
 #define YIELD_DELAY_MS     100     /* yield when controller is busy    */
 #define STOP_TIMEOUT_MS    5000    /* max wait for task to exit        */
 
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
 /*  Module state                                                       */
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
 
-static bool               running       = false;
-static ble_spoof_mode_t   active_mode   = BLE_SPOOF_MODE_NAME;
-static TaskHandle_t       task_handle   = NULL;
-static SemaphoreHandle_t  mutex         = NULL;
-static SemaphoreHandle_t  task_exit_sem = NULL;
-static int                last_error    = 0;
+static volatile bool          running          = false;
+static ble_spoof_mode_t       active_mode      = BLE_SPOOF_MODE_NAME;
+static TaskHandle_t           task_handle      = NULL;
+static SemaphoreHandle_t      mutex            = NULL;
+static SemaphoreHandle_t      task_exit_sem    = NULL;
+static esp_timer_handle_t     timeout_timer    = NULL;
 
-/* Name-spoof state */
-static char  current_name[128] = {0};
+/* Name-spoof state (protected by mutex) */
+static char  current_names[128] = {0};
 
-/* Clone state (deep copy of profile) */
+/* Clone state (protected by mutex) */
 static ble_spoof_clone_profile_t clone_profile = {0};
 
-/* ------------------------------------------------------------------ */
-/*  Forward declarations                                               */
-/* ------------------------------------------------------------------ */
+/* Timing & counters */
+static volatile uint32_t    packet_count       = 0;
+static int64_t              start_time_us      = 0;
+static int64_t              stop_time_us       = 0;
+static int                  config_timeout_sec = 0;
+static int                  config_adv_int_ms  = 0;
+static int                  config_cycle_ms    = 0;
+static volatile bool        timeout_fired      = false;
+static volatile int         last_error         = 0;
 
+/* ================================================================== */
+/*  Forward declarations                                               */
+/* ================================================================== */
+
+static void timeout_timer_cb(void *arg);
 static void spoof_task(void *arg);
 static void set_random_mac(void);
 static int  adv_event_cb(struct ble_gap_event *event, void *arg);
 static void build_name_adv_payload(const char *name, uint8_t *out, size_t *out_len);
 static void build_clone_adv_payload(const ble_spoof_clone_profile_t *prof,
                                      uint8_t *out, size_t *out_len);
+static int  count_names_in_str(const char *s);
 
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
+/*  Timeout timer                                                      */
+/* ================================================================== */
+
+static void timeout_timer_cb(void *arg) {
+    (void)arg;
+    timeout_fired = true;
+    running       = false;
+    ESP_LOGW(TAG, "Auto-stop timeout reached (%d sec)", config_timeout_sec);
+}
+
+/**
+ * Create and start a one-shot timeout timer.
+ * Pass timeout_sec <= 0 to skip (no timer created).
+ * If a previous timer exists, it is stopped and deleted first.
+ */
+static void start_timeout_timer(int timeout_sec) {
+    /* Clean up any previous timer */
+    if (timeout_timer != NULL) {
+        esp_timer_stop(timeout_timer);
+        esp_timer_delete(timeout_timer);
+        timeout_timer = NULL;
+    }
+    if (timeout_sec > 0) {
+        const esp_timer_create_args_t args = {
+            .callback = timeout_timer_cb,
+            .name     = "ble_spoof_timeout",
+        };
+        esp_timer_create(&args, &timeout_timer);
+        esp_timer_start_once(timeout_timer, (int64_t)timeout_sec * 1000000LL);
+    }
+}
+
+/** Stop and delete the timeout timer if it exists. */
+static void stop_timeout_timer(void) {
+    if (timeout_timer != NULL) {
+        esp_timer_stop(timeout_timer);
+        esp_timer_delete(timeout_timer);
+        timeout_timer = NULL;
+    }
+}
+
+/* ================================================================== */
+/*  Utility                                                            */
+/* ================================================================== */
+
+/** Count comma-separated names in a string (max MAX_NAMES). */
+static int count_names_in_str(const char *s) {
+    if (s == NULL || s[0] == '\0') return 0;
+    int count = 1;
+    for (const char *p = s; *p; p++) {
+        if (*p == ',') count++;
+    }
+    return (count > MAX_NAMES) ? MAX_NAMES : count;
+}
+
+/* ================================================================== */
 /*  Random MAC rotation                                                */
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
 
 static void set_random_mac(void) {
     uint8_t mac[6];
     esp_fill_random(mac, 6);
-    /* Top two bits must be 1 for random static address (BT spec 4.2 Vol 6 Part B 1.3.2.1) */
+    /* Top two bits must be 1 for random static address
+     * (BT spec 4.2 Vol 6 Part B 1.3.2.1) */
     mac[5] |= 0xC0;
     int rc = ble_hs_id_set_rnd(mac);
     if (rc != 0) {
@@ -431,9 +182,9 @@ static void set_random_mac(void) {
     }
 }
 
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
 /*  GAP event callback                                                 */
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
 
 static int adv_event_cb(struct ble_gap_event *event, void *arg) {
     (void)arg;
@@ -447,13 +198,15 @@ static int adv_event_cb(struct ble_gap_event *event, void *arg) {
     return 0;
 }
 
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
 /*  Build advertising payloads                                         */
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
 
 /**
  * Build a minimal adv payload for name-spoof mode.
  * [Flags] [Complete Local Name]
+ *
+ * Total must not exceed 31 bytes.
  */
 static void build_name_adv_payload(const char *name, uint8_t *out, size_t *out_len) {
     size_t n = name ? strlen(name) : 0;
@@ -480,40 +233,39 @@ static void build_name_adv_payload(const char *name, uint8_t *out, size_t *out_l
  * Tries to fit: [Flags] [16-bit UUIDs] [128-bit UUID] [Appearance]
  *               [TX Power] [Manufacturer Data] [Complete/Shortened Name]
  *
- * We add fields in order of priority; if the 31-byte limit is reached,
- * less important fields are silently dropped.  The name is added last
- * so that service UUIDs (which phones use for auto-connect matching)
- * take priority.
+ * Fields are added in priority order.  If the 31-byte limit is reached,
+ * less important fields (name is last) are silently dropped.  Service
+ * UUIDs take priority because phones use them for auto-connect matching.
+ *
+ * If the profile has raw_adv data, it is used directly (highest fidelity).
  */
 static void build_clone_adv_payload(const ble_spoof_clone_profile_t *prof,
                                      uint8_t *out, size_t *out_len) {
     size_t idx = 0;
 
-    /* If we have a raw payload from the scan, just use it directly */
+    /* ---- Use raw payload directly if available ---- */
     if (prof->raw_adv_len > 0 && prof->raw_adv_len <= ADV_MAX_LEN) {
         memcpy(out, prof->raw_adv, prof->raw_adv_len);
         *out_len = prof->raw_adv_len;
         return;
     }
 
-    /* --- Flags (3 bytes) --- */
+    /* ---- Reconstruct from parsed fields ---- */
+
+    /* Flags (3 bytes) */
     if (idx + 3 <= ADV_MAX_LEN) {
         out[idx++] = 2;
         out[idx++] = 0x01;
         out[idx++] = prof->flags;
     }
 
-    /* --- 16-bit Service UUID list --- */
+    /* 16-bit Service UUID list */
     if (prof->svc_uuids_16_count > 0) {
         size_t field_len = 1 + (prof->svc_uuids_16_count * 2);
         if (idx + 1 + field_len <= ADV_MAX_LEN) {
             out[idx++] = (uint8_t)field_len;
+            /* 0x02 = Incomplete, 0x03 = Complete 16-bit UUID list */
             out[idx++] = (prof->svc_uuids_16_count > 1) ? 0x03 : 0x02;
-            /* Complete vs Incomplete 16-bit UUID list */
-            if (prof->svc_uuids_16_count > 1)
-                out[idx - 1] = 0x03;  /* Complete List of 16-bit UUIDs */
-            else
-                out[idx - 1] = 0x02;  /* Incomplete List of 16-bit UUIDs */
             for (int i = 0; i < prof->svc_uuids_16_count; i++) {
                 out[idx++] = prof->svc_uuids_16[i][0];
                 out[idx++] = prof->svc_uuids_16[i][1];
@@ -521,7 +273,7 @@ static void build_clone_adv_payload(const ble_spoof_clone_profile_t *prof,
         }
     }
 
-    /* --- 128-bit Service UUID (only first, it's huge) --- */
+    /* 128-bit Service UUID (only first - it takes 17 bytes) */
     if (prof->svc_uuids_128_count > 0 && idx + 17 <= ADV_MAX_LEN) {
         out[idx++] = 16 + 1;
         out[idx++] = 0x06;  /* Incomplete List of 128-bit UUIDs */
@@ -529,7 +281,7 @@ static void build_clone_adv_payload(const ble_spoof_clone_profile_t *prof,
         idx += 16;
     }
 
-    /* --- Appearance --- */
+    /* Appearance (4 bytes) */
     if (prof->has_appearance && idx + 4 <= ADV_MAX_LEN) {
         out[idx++] = 3;
         out[idx++] = 0x19;  /* Appearance */
@@ -537,14 +289,14 @@ static void build_clone_adv_payload(const ble_spoof_clone_profile_t *prof,
         out[idx++] = (uint8_t)((prof->appearance >> 8) & 0xFF);
     }
 
-    /* --- TX Power Level --- */
+    /* TX Power Level (3 bytes) */
     if (prof->has_tx_power && idx + 3 <= ADV_MAX_LEN) {
         out[idx++] = 2;
         out[idx++] = 0x0A;  /* TX Power Level */
         out[idx++] = (uint8_t)prof->tx_power;
     }
 
-    /* --- Manufacturer Specific Data --- */
+    /* Manufacturer Specific Data */
     if (prof->has_mfr_data && prof->mfr_data_len > 0) {
         size_t field_len = 1 + 2 + prof->mfr_data_len;  /* type + company_id + data */
         if (idx + 1 + field_len <= ADV_MAX_LEN) {
@@ -557,14 +309,14 @@ static void build_clone_adv_payload(const ble_spoof_clone_profile_t *prof,
         }
     }
 
-    /* --- Local Name (lowest priority, added last) --- */
+    /* Local Name (lowest priority, added last) */
     size_t name_len = strlen(prof->name);
     if (name_len > 0) {
         size_t remaining = ADV_MAX_LEN - idx;
         if (remaining >= 3) {  /* need at least: len(1) + type(1) + 1 char */
-            size_t max_name = remaining - 2;  /* minus len+type bytes */
+            size_t max_name = remaining - 2;
             if (name_len > max_name) {
-                /* Use Shortened Local Name if it doesn't fit */
+                /* Use Shortened Local Name if full name doesn't fit */
                 out[idx++] = (uint8_t)(max_name + 1);
                 out[idx++] = 0x08;  /* Shortened Local Name */
                 memcpy(&out[idx], prof->name, max_name);
@@ -581,24 +333,36 @@ static void build_clone_adv_payload(const ble_spoof_clone_profile_t *prof,
     *out_len = idx;
 }
 
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
 /*  Main spoof/clone task                                              */
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
 
 static void spoof_task(void *arg) {
     (void)arg;
 
-    /* ---- NAME-SPOOF MODE ---- */
+    /* ---- Compute NimBLE advertising interval from config ---- */
+    int adv_int_ms = (config_adv_int_ms > 0) ? config_adv_int_ms : DEFAULT_ADV_INT_MS;
+    int cycle_ms   = (config_cycle_ms > 0)   ? config_cycle_ms   : DEFAULT_CYCLE_MS;
+
+    /* NimBLE interval units: 1 unit = 0.625 ms */
+    uint16_t itvl_min = (uint16_t)(adv_int_ms * 8 / 5);   /* ms * 1000/625 */
+    uint16_t itvl_max = itvl_min + 8;                       /* small randomization */
+    if (itvl_min < 0x0020) itvl_min = 0x0020;              /* BLE spec minimum */
+    if (itvl_max > 0x4000) itvl_max = 0x4000;              /* BLE spec maximum */
+
+    /* ================================================================ */
+    /*  NAME-SPOOF MODE                                                 */
+    /* ================================================================ */
     if (active_mode == BLE_SPOOF_MODE_NAME) {
         char names[MAX_NAMES][MAX_NAME_LEN + 1];
         int  name_count = 0;
         int  cur = 0;
 
+        /* Parse comma-separated names under mutex */
         xSemaphoreTake(mutex, portMAX_DELAY);
-        strncpy(names[0], current_name, MAX_NAME_LEN);
+        strncpy(names[0], current_names, MAX_NAME_LEN);
         names[0][MAX_NAME_LEN] = '\0';
 
-        /* Parse comma-separated names */
         char *p = strchr(names[0], ',');
         while (p && name_count < MAX_NAMES - 1) {
             *p = '\0';
@@ -610,10 +374,17 @@ static void spoof_task(void *arg) {
         name_count++;  /* at least one */
         xSemaphoreGive(mutex);
 
-        ESP_LOGI(TAG, "NAME-SPOOF mode: %d name(s) loaded", name_count);
+        if (name_count <= 0 || names[0][0] == '\0') {
+            ESP_LOGW(TAG, "No valid names provided, advertising flags only");
+            name_count = 1;
+        }
+
+        ESP_LOGI(TAG, "NAME-SPOOF mode: %d name(s), interval=%dms, cycle=%dms, timeout=%ds",
+                 name_count, adv_int_ms, cycle_ms,
+                 config_timeout_sec > 0 ? config_timeout_sec : -1);
 
         while (running) {
-            /* Yield to other BLE operations */
+            /* Yield to other BLE operations (scan / connect) */
             if (ble_gap_conn_active() || ble_gap_disc_active()) {
                 vTaskDelay(pdMS_TO_TICKS(YIELD_DELAY_MS));
                 continue;
@@ -623,14 +394,17 @@ static void spoof_task(void *arg) {
                 vTaskDelay(pdMS_TO_TICKS(20));
             }
 
+            /* Rotate MAC each cycle for stealth */
             set_random_mac();
             vTaskDelay(pdMS_TO_TICKS(10));
 
+            /* Pick next name */
             xSemaphoreTake(mutex, portMAX_DELAY);
             char sel[MAX_NAME_LEN + 1] = {0};
             strncpy(sel, names[cur % name_count], MAX_NAME_LEN);
             xSemaphoreGive(mutex);
 
+            /* Build and set advertising data */
             uint8_t adv[ADV_MAX_LEN];
             size_t  adv_len = 0;
             build_name_adv_payload(sel, adv, &adv_len);
@@ -644,11 +418,12 @@ static void spoof_task(void *arg) {
                 continue;
             }
 
+            /* Start advertising */
             struct ble_gap_adv_params adv_params = {0};
             adv_params.conn_mode = BLE_GAP_CONN_MODE_NON;
             adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
-            adv_params.itvl_min = ADV_INTERVAL_MIN;
-            adv_params.itvl_max = ADV_INTERVAL_MAX;
+            adv_params.itvl_min  = itvl_min;
+            adv_params.itvl_max  = itvl_max;
 
             rc = ble_gap_adv_start(BLE_OWN_ADDR_RANDOM, NULL, ADV_DURATION_MS,
                                    &adv_params, adv_event_cb, NULL);
@@ -656,17 +431,22 @@ static void spoof_task(void *arg) {
                 ESP_LOGE(TAG, "adv_start failed: %d", rc);
                 last_error = rc;
             } else {
+                packet_count++;
                 vTaskDelay(pdMS_TO_TICKS(ADV_DURATION_MS));
                 if (ble_gap_adv_active()) ble_gap_adv_stop();
             }
 
             cur++;
-            vTaskDelay(pdMS_TO_TICKS(CYCLE_DELAY_MS));
+            vTaskDelay(pdMS_TO_TICKS(cycle_ms));
         }
 
-    /* ---- CLONE MODE ---- */
+    /* ================================================================ */
+    /*  CLONE MODE                                                      */
+    /* ================================================================ */
     } else if (active_mode == BLE_SPOOF_MODE_CLONE) {
-        ESP_LOGI(TAG, "CLONE mode: cloning device '%s'", clone_profile.name);
+        ESP_LOGI(TAG, "CLONE mode: cloning '%s', interval=%dms, cycle=%dms, timeout=%ds",
+                 clone_profile.name, adv_int_ms, cycle_ms,
+                 config_timeout_sec > 0 ? config_timeout_sec : -1);
 
         while (running) {
             /* Yield to other BLE operations */
@@ -683,6 +463,7 @@ static void spoof_task(void *arg) {
             set_random_mac();
             vTaskDelay(pdMS_TO_TICKS(10));
 
+            /* Build clone payload */
             uint8_t adv[ADV_MAX_LEN];
             size_t  adv_len = 0;
             build_clone_adv_payload(&clone_profile, adv, &adv_len);
@@ -695,11 +476,12 @@ static void spoof_task(void *arg) {
                 continue;
             }
 
+            /* Start advertising */
             struct ble_gap_adv_params adv_params = {0};
             adv_params.conn_mode = BLE_GAP_CONN_MODE_NON;
             adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
-            adv_params.itvl_min = ADV_INTERVAL_MIN;
-            adv_params.itvl_max = ADV_INTERVAL_MAX;
+            adv_params.itvl_min  = itvl_min;
+            adv_params.itvl_max  = itvl_max;
 
             rc = ble_gap_adv_start(BLE_OWN_ADDR_RANDOM, NULL, ADV_DURATION_MS,
                                    &adv_params, adv_event_cb, NULL);
@@ -707,20 +489,21 @@ static void spoof_task(void *arg) {
                 ESP_LOGE(TAG, "clone adv_start failed: %d", rc);
                 last_error = rc;
             } else {
+                packet_count++;
                 vTaskDelay(pdMS_TO_TICKS(ADV_DURATION_MS));
                 if (ble_gap_adv_active()) ble_gap_adv_stop();
             }
 
-            vTaskDelay(pdMS_TO_TICKS(CYCLE_DELAY_MS));
+            vTaskDelay(pdMS_TO_TICKS(cycle_ms));
         }
     }
 
-    /* ---- Cleanup ---- */
+    /* ---- Task cleanup ---- */
     if (ble_gap_adv_active()) {
         ble_gap_adv_stop();
     }
 
-    ESP_LOGI(TAG, "BLE spoof/clone task exiting");
+    ESP_LOGI(TAG, "BLE spoof/clone task exiting (packets=%u)", packet_count);
     task_handle = NULL;
     if (task_exit_sem) {
         xSemaphoreGive(task_exit_sem);
@@ -728,9 +511,9 @@ static void spoof_task(void *arg) {
     vTaskDelete(NULL);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Public API – init                                                  */
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
+/*  Public API - init                                                  */
+/* ================================================================== */
 
 void ble_spoof_init(void) {
     if (mutex == NULL) {
@@ -740,86 +523,118 @@ void ble_spoof_init(void) {
         task_exit_sem = xSemaphoreCreateBinary();
     }
 
-    /* Ensure NimBLE is initialized */
+    /* Ensure NimBLE is initialized (idempotent) */
     ble_common_init();
 
     ESP_LOGI(TAG, "ble_spoof initialized (name-spoof + clone)");
 }
 
-/* ------------------------------------------------------------------ */
-/*  Public API – name spoof                                            */
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
+/*  Public API - start with config                                     */
+/* ================================================================== */
 
-void ble_spoof_start(const char *name) {
+void ble_spoof_start_config(const ble_spoof_config_t *cfg) {
     if (running) {
         ESP_LOGW(TAG, "Already running, stop first");
         return;
     }
+    if (cfg == NULL) {
+        ESP_LOGE(TAG, "start_config: NULL config");
+        return;
+    }
     if (mutex == NULL) mutex = xSemaphoreCreateMutex();
 
-    xSemaphoreTake(mutex, portMAX_DELAY);
-    strncpy(current_name, name ? name : "", sizeof(current_name) - 1);
-    current_name[sizeof(current_name) - 1] = '\0';
-    xSemaphoreGive(mutex);
+    /* Clean up any previous timeout timer */
+    stop_timeout_timer();
 
-    active_mode = BLE_SPOOF_MODE_NAME;
-    running = true;
-    last_error = 0;
+    /* Reset counters and state */
+    packet_count       = 0;
+    timeout_fired      = false;
+    last_error         = 0;
+    start_time_us      = esp_timer_get_time();
+    stop_time_us       = 0;
 
-    if (task_exit_sem != NULL) {
-        xSemaphoreTake(task_exit_sem, 0);  /* clear previous signal */
+    /* Store config (treat 0 as "use default") */
+    active_mode        = cfg->mode;
+    config_adv_int_ms  = (cfg->adv_interval_ms > 0) ? cfg->adv_interval_ms : DEFAULT_ADV_INT_MS;
+    config_cycle_ms    = (cfg->cycle_delay_ms > 0)   ? cfg->cycle_delay_ms  : DEFAULT_CYCLE_MS;
+
+    /* timeout: 0 = use default, -1 = no timeout, >0 = custom */
+    if (cfg->timeout_sec == 0) {
+        config_timeout_sec = DEFAULT_TIMEOUT_S;
+    } else {
+        config_timeout_sec = cfg->timeout_sec;
     }
 
+    /* Mode-specific config */
+    if (cfg->mode == BLE_SPOOF_MODE_NAME) {
+        xSemaphoreTake(mutex, portMAX_DELAY);
+        strncpy(current_names, cfg->names, sizeof(current_names) - 1);
+        current_names[sizeof(current_names) - 1] = '\0';
+        xSemaphoreGive(mutex);
+    } else if (cfg->mode == BLE_SPOOF_MODE_CLONE) {
+        xSemaphoreTake(mutex, portMAX_DELAY);
+        memcpy(&clone_profile, &cfg->clone_profile, sizeof(clone_profile));
+        xSemaphoreGive(mutex);
+    }
+
+    running = true;
+
+    /* Clear any stale exit semaphore */
+    if (task_exit_sem != NULL) {
+        xSemaphoreTake(task_exit_sem, 0);
+    }
+
+    /* Start auto-stop timeout timer */
+    start_timeout_timer(config_timeout_sec);
+
+    /* Create the spoof/clone task */
     BaseType_t ret = xTaskCreate(spoof_task, "ble_spoof", TASK_STACK_SIZE,
                                   NULL, TASK_PRIORITY, &task_handle);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create spoof task");
         running = false;
+        stop_timeout_timer();
     } else {
-        ESP_LOGI(TAG, "Name-spoof started: '%s'", name ? name : "(empty)");
+        ESP_LOGI(TAG, "Started %s mode (timeout=%ds)",
+                 cfg->mode == BLE_SPOOF_MODE_NAME ? "NAME-SPOOF" : "CLONE",
+                 config_timeout_sec > 0 ? config_timeout_sec : -1);
     }
 }
 
-/* ------------------------------------------------------------------ */
-/*  Public API – clone from profile                                    */
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
+/*  Public API - backward-compat name spoof                            */
+/* ================================================================== */
+
+void ble_spoof_start(const char *name) {
+    ble_spoof_config_t cfg = {0};
+    cfg.mode = BLE_SPOOF_MODE_NAME;
+    if (name) {
+        strncpy(cfg.names, name, sizeof(cfg.names) - 1);
+    }
+    /* Uses default timeout, interval, and cycle delay */
+    ble_spoof_start_config(&cfg);
+}
+
+/* ================================================================== */
+/*  Public API - clone from profile                                    */
+/* ================================================================== */
 
 void ble_spoof_clone_start(const ble_spoof_clone_profile_t *profile) {
-    if (running) {
-        ESP_LOGW(TAG, "Already running, stop first");
-        return;
-    }
     if (profile == NULL) {
         ESP_LOGE(TAG, "clone_start: NULL profile");
         return;
     }
-    if (mutex == NULL) mutex = xSemaphoreCreateMutex();
-
-    xSemaphoreTake(mutex, portMAX_DELAY);
-    memcpy(&clone_profile, profile, sizeof(clone_profile));
-    xSemaphoreGive(mutex);
-
-    active_mode = BLE_SPOOF_MODE_CLONE;
-    running = true;
-    last_error = 0;
-
-    if (task_exit_sem != NULL) {
-        xSemaphoreTake(task_exit_sem, 0);
-    }
-
-    BaseType_t ret = xTaskCreate(spoof_task, "ble_clone", TASK_STACK_SIZE,
-                                  NULL, TASK_PRIORITY, &task_handle);
-    if (ret != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create clone task");
-        running = false;
-    } else {
-        ESP_LOGI(TAG, "Clone mode started: '%s'", profile->name);
-    }
+    ble_spoof_config_t cfg = {0};
+    cfg.mode = BLE_SPOOF_MODE_CLONE;
+    memcpy(&cfg.clone_profile, profile, sizeof(cfg.clone_profile));
+    /* Uses default timeout, interval, and cycle delay */
+    ble_spoof_start_config(&cfg);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Public API – clone from raw adv data                               */
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
+/*  Public API - clone from raw adv data                               */
+/* ================================================================== */
 
 void ble_spoof_clone_start_raw(const uint8_t *raw_adv, uint8_t raw_len) {
     if (raw_adv == NULL || raw_len == 0 || raw_len > ADV_MAX_LEN) {
@@ -833,44 +648,54 @@ void ble_spoof_clone_start_raw(const uint8_t *raw_adv, uint8_t raw_len) {
         return;
     }
 
-    /* Also store the raw data as fallback */
+    /* Also store the raw data as highest-fidelity fallback */
     memcpy(profile.raw_adv, raw_adv, raw_len);
     profile.raw_adv_len = raw_len;
 
     ble_spoof_clone_start(&profile);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Public API – stop                                                  */
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
+/*  Public API - stop                                                  */
+/* ================================================================== */
 
 void ble_spoof_stop(void) {
-    if (!running) return;
+    bool was_running = running;
     running = false;
 
+    /* Record stop time for elapsed calculation */
+    if (stop_time_us == 0) {
+        stop_time_us = esp_timer_get_time();
+    }
+
+    /* Stop and delete the timeout timer */
+    stop_timeout_timer();
+
     /* Wait for the task to actually exit */
-    if (task_exit_sem != NULL) {
-        if (xSemaphoreTake(task_exit_sem, pdMS_TO_TICKS(STOP_TIMEOUT_MS)) != pdTRUE) {
-            ESP_LOGW(TAG, "Task exit timeout, forcing delete");
+    if (was_running) {
+        if (task_exit_sem != NULL) {
+            if (xSemaphoreTake(task_exit_sem, pdMS_TO_TICKS(STOP_TIMEOUT_MS)) != pdTRUE) {
+                ESP_LOGW(TAG, "Task exit timeout, forcing delete");
+                if (task_handle != NULL) {
+                    vTaskDelete(task_handle);
+                    task_handle = NULL;
+                }
+            }
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(1000));
             if (task_handle != NULL) {
                 vTaskDelete(task_handle);
                 task_handle = NULL;
             }
         }
-    } else {
-        vTaskDelay(pdMS_TO_TICKS(1000));
-        if (task_handle != NULL) {
-            vTaskDelete(task_handle);
-            task_handle = NULL;
-        }
+        ESP_LOGI(TAG, "BLE spoof/clone stopped (packets=%u, elapsed=%ds)",
+                 packet_count, ble_spoof_get_elapsed_sec());
     }
-
-    ESP_LOGI(TAG, "BLE spoof/clone stopped");
 }
 
-/* ------------------------------------------------------------------ */
-/*  Public API – status                                                */
-/* ------------------------------------------------------------------ */
+/* ================================================================== */
+/*  Public API - status getters                                        */
+/* ================================================================== */
 
 bool ble_spoof_is_running(void) {
     return running;
@@ -880,12 +705,76 @@ ble_spoof_mode_t ble_spoof_get_mode(void) {
     return active_mode;
 }
 
+const char* ble_spoof_get_mode_name(void) {
+    return (active_mode == BLE_SPOOF_MODE_CLONE) ? "clone" : "name";
+}
+
+uint32_t ble_spoof_get_packet_count(void) {
+    return packet_count;
+}
+
+int ble_spoof_get_elapsed_sec(void) {
+    if (start_time_us == 0) return 0;
+
+    int64_t end;
+    if (running) {
+        end = esp_timer_get_time();
+    } else if (stop_time_us > start_time_us) {
+        end = stop_time_us;
+    } else {
+        end = esp_timer_get_time();
+    }
+
+    int sec = (int)((end - start_time_us) / 1000000);
+    return (sec < 0) ? 0 : sec;
+}
+
+int ble_spoof_get_remaining_sec(void) {
+    if (config_timeout_sec <= 0) return -1;  /* no timeout configured */
+    int elapsed = ble_spoof_get_elapsed_sec();
+    int rem = config_timeout_sec - elapsed;
+    return (rem < 0) ? 0 : rem;
+}
+
+bool ble_spoof_was_timeout(void) {
+    return timeout_fired;
+}
+
 int ble_spoof_last_error(void) {
     return last_error;
 }
 
+cJSON* ble_spoof_get_status_json(void) {
+    cJSON *root = cJSON_CreateObject();
+    if (root == NULL) return NULL;
+
+    cJSON_AddBoolToObject(root,   "running",          running);
+    cJSON_AddStringToObject(root, "mode",             ble_spoof_get_mode_name());
+    cJSON_AddNumberToObject(root, "packets",          packet_count);
+    cJSON_AddNumberToObject(root, "elapsed",          ble_spoof_get_elapsed_sec());
+    cJSON_AddNumberToObject(root, "remaining",        ble_spoof_get_remaining_sec());
+    cJSON_AddBoolToObject(root,   "timeout",          timeout_fired);
+    cJSON_AddNumberToObject(root, "last_error",       last_error);
+    cJSON_AddNumberToObject(root, "adv_interval_ms",  config_adv_int_ms);
+    cJSON_AddNumberToObject(root, "cycle_delay_ms",   config_cycle_ms);
+
+    if (active_mode == BLE_SPOOF_MODE_NAME) {
+        xSemaphoreTake(mutex, portMAX_DELAY);
+        cJSON_AddStringToObject(root, "device_name", current_names);
+        cJSON_AddNumberToObject(root, "name_count",  count_names_in_str(current_names));
+        xSemaphoreGive(mutex);
+    } else {
+        xSemaphoreTake(mutex, portMAX_DELAY);
+        cJSON_AddStringToObject(root, "device_name", clone_profile.name);
+        cJSON_AddNumberToObject(root, "name_count",  1);
+        xSemaphoreGive(mutex);
+    }
+
+    return root;
+}
+
 /* ================================================================== */
-/*  ADV PARSER – extract fields from raw BLE advertising data          */
+/*  ADV PARSER - extract fields from raw BLE advertising data          */
 /* ================================================================== */
 
 esp_err_t ble_spoof_parse_adv(const uint8_t *raw_adv, uint8_t raw_len,
@@ -917,12 +806,11 @@ esp_err_t ble_spoof_parse_adv(const uint8_t *raw_adv, uint8_t raw_len,
 
             /* ---- Incomplete List of 16-bit UUIDs ---- */
             case 0x02:
-                /* fall-through */
             /* ---- Complete List of 16-bit UUIDs ---- */
             case 0x03: {
                 int count = data_len / 2;
                 if (count > BLE_SPOOF_MAX_SVC_UUIDS) count = BLE_SPOOF_MAX_SVC_UUIDS;
-                for (int i = 0; i < count; i++) {
+                for (int i = 0; i < count && out->svc_uuids_16_count < BLE_SPOOF_MAX_SVC_UUIDS; i++) {
                     out->svc_uuids_16[out->svc_uuids_16_count][0] = data[i * 2];
                     out->svc_uuids_16[out->svc_uuids_16_count][1] = data[i * 2 + 1];
                     out->svc_uuids_16_count++;
@@ -932,7 +820,6 @@ esp_err_t ble_spoof_parse_adv(const uint8_t *raw_adv, uint8_t raw_len,
 
             /* ---- Incomplete List of 128-bit UUIDs ---- */
             case 0x06:
-                /* fall-through */
             /* ---- Complete List of 128-bit UUIDs ---- */
             case 0x07: {
                 if (data_len >= 16 && out->svc_uuids_128_count < BLE_SPOOF_MAX_SVC_UUIDS) {
@@ -944,7 +831,6 @@ esp_err_t ble_spoof_parse_adv(const uint8_t *raw_adv, uint8_t raw_len,
 
             /* ---- Shortened Local Name ---- */
             case 0x08:
-                /* fall-through */
             /* ---- Complete Local Name ---- */
             case 0x09: {
                 size_t copy_len = data_len;
@@ -985,7 +871,7 @@ esp_err_t ble_spoof_parse_adv(const uint8_t *raw_adv, uint8_t raw_len,
                 break;
 
             default:
-                /* Unknown AD type – skip */
+                /* Unknown AD type - skip */
                 break;
         }
 
@@ -996,7 +882,7 @@ esp_err_t ble_spoof_parse_adv(const uint8_t *raw_adv, uint8_t raw_len,
 }
 
 /* ================================================================== */
-/*  ADV BUILDER – reconstruct payload from clone profile               */
+/*  ADV BUILDER - reconstruct payload from clone profile               */
 /* ================================================================== */
 
 esp_err_t ble_spoof_build_adv(const ble_spoof_clone_profile_t *profile,

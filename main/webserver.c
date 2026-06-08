@@ -1096,17 +1096,48 @@ static esp_err_t ble_spoof_start_handler(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
         return ESP_FAIL;
     }
-    char content[200];
+    char content[256];
     int ret = httpd_req_recv(req, content, sizeof(content) - 1);
     if (ret <= 0) return ESP_FAIL;
     content[ret] = '\0';
     cJSON *root = cJSON_Parse(content);
     if (!root) return ESP_FAIL;
-    cJSON *name = cJSON_GetObjectItem(root, "name");
-    const char *sname = cJSON_IsString(name) ? name->valuestring : NULL;
-    ble_spoof_start(sname);
+
+    cJSON *name_json           = cJSON_GetObjectItem(root, "name");
+    cJSON *adv_interval_json   = cJSON_GetObjectItem(root, "adv_interval_ms");
+    cJSON *cycle_delay_json    = cJSON_GetObjectItem(root, "cycle_delay_ms");
+    cJSON *timeout_json        = cJSON_GetObjectItem(root, "timeout_sec");
+
+    ble_spoof_config_t cfg = {0};
+    cfg.mode = BLE_SPOOF_MODE_NAME;
+    if (cJSON_IsString(name_json) && name_json->valuestring != NULL) {
+        strncpy(cfg.names, name_json->valuestring, sizeof(cfg.names) - 1);
+    }
+    if (cJSON_IsNumber(adv_interval_json)) {
+        cfg.adv_interval_ms = adv_interval_json->valueint;
+    }
+    if (cJSON_IsNumber(cycle_delay_json)) {
+        cfg.cycle_delay_ms = cycle_delay_json->valueint;
+    }
+    if (cJSON_IsNumber(timeout_json)) {
+        cfg.timeout_sec = timeout_json->valueint;
+    }
+
+    ble_spoof_init();
+    ble_spoof_start_config(&cfg);
+
     cJSON_Delete(root);
     return send_success_response(req);
+}
+
+static esp_err_t ble_spoof_status_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    cJSON *status = ble_spoof_get_status_json();
+    return send_json_response(req, status);
 }
 
 static esp_err_t ble_spoof_stop_handler(httpd_req_t *req) {
@@ -1824,6 +1855,8 @@ void start_web_server(void) {
         httpd_register_uri_handler(server, &ble_spoof_start_uri);
         httpd_uri_t ble_spoof_stop_uri = { .uri = "/api/ble/spoof/stop", .method = HTTP_POST, .handler = ble_spoof_stop_handler };
         httpd_register_uri_handler(server, &ble_spoof_stop_uri);
+        httpd_uri_t ble_spoof_status_uri = { .uri = "/api/ble/spoof/status", .method = HTTP_GET, .handler = ble_spoof_status_handler };
+        httpd_register_uri_handler(server, &ble_spoof_status_uri);
         httpd_uri_t ble_spoof_clone_uri = { .uri = "/api/ble/spoof/clone", .method = HTTP_POST, .handler = ble_spoof_clone_handler };
         httpd_register_uri_handler(server, &ble_spoof_clone_uri);
         httpd_uri_t ble_connect_start_uri = { .uri = "/api/ble/connect/start", .method = HTTP_POST, .handler = ble_connect_start_handler };
