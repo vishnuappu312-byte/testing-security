@@ -1262,15 +1262,54 @@ static esp_err_t ble_connect_start_handler(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
         return ESP_FAIL;
     }
-    char content[200];
+    char content[300];
     int ret = httpd_req_recv(req, content, sizeof(content) - 1);
     if (ret <= 0) return ESP_FAIL;
     content[ret] = '\0';
     cJSON *root = cJSON_Parse(content);
     if (!root) return ESP_FAIL;
-    cJSON *addr = cJSON_GetObjectItem(root, "addr");
-    const char *saddr = cJSON_IsString(addr) ? addr->valuestring : NULL;
-    ble_connect_flood_start(saddr);
+
+    cJSON *addr_json           = cJSON_GetObjectItem(root, "addr");
+    cJSON *addr_type_json      = cJSON_GetObjectItem(root, "addr_type");
+    cJSON *interval_json       = cJSON_GetObjectItem(root, "connect_interval_ms");
+    cJSON *cooldown_json       = cJSON_GetObjectItem(root, "success_cooldown_ms");
+    cJSON *backoff_json        = cJSON_GetObjectItem(root, "fail_backoff_ms");
+    cJSON *timeout_json        = cJSON_GetObjectItem(root, "timeout_sec");
+    cJSON *rotate_mac_json     = cJSON_GetObjectItem(root, "rotate_own_mac");
+
+    const char *saddr = cJSON_IsString(addr_json) ? addr_json->valuestring : NULL;
+
+    ble_connect_flood_config_t cfg = {0};
+    if (saddr) {
+        strncpy(cfg.target_addr, saddr, sizeof(cfg.target_addr) - 1);
+        cfg.target_addr[sizeof(cfg.target_addr) - 1] = '\0';
+    }
+
+    cfg.addr_type = cJSON_IsNumber(addr_type_json)
+        ? (ble_connect_flood_addr_type_t)addr_type_json->valueint
+        : BLE_CF_ADDR_AUTO;
+    if (cfg.addr_type > BLE_CF_ADDR_AUTO) cfg.addr_type = BLE_CF_ADDR_AUTO;
+
+    cfg.connect_interval_ms = cJSON_IsNumber(interval_json)
+        ? (uint32_t)interval_json->valueint : 1500;
+    cfg.success_cooldown_ms = cJSON_IsNumber(cooldown_json)
+        ? (uint32_t)cooldown_json->valueint : 5000;
+    cfg.fail_backoff_ms     = cJSON_IsNumber(backoff_json)
+        ? (uint32_t)backoff_json->valueint : 2000;
+    cfg.timeout_sec         = cJSON_IsNumber(timeout_json)
+        ? (uint32_t)timeout_json->valueint : 300;
+    cfg.rotate_own_mac      = cJSON_IsBool(rotate_mac_json)
+        ? (bool)rotate_mac_json->valueint : true;
+
+    ble_connect_flood_init();
+    ble_connect_flood_start_config(&cfg);
+
+    ESP_LOGI(TAG, "BLE connect flood started: target=%s addr_type=%d interval=%u cooldown=%u backoff=%u timeout=%u rotate=%d",
+             cfg.target_addr, cfg.addr_type,
+             (unsigned)cfg.connect_interval_ms, (unsigned)cfg.success_cooldown_ms,
+             (unsigned)cfg.fail_backoff_ms, (unsigned)cfg.timeout_sec,
+             cfg.rotate_own_mac);
+
     cJSON_Delete(root);
     return send_success_response(req);
 }
@@ -1282,6 +1321,15 @@ static esp_err_t ble_connect_stop_handler(httpd_req_t *req) {
     }
     ble_connect_flood_stop();
     return send_success_response(req);
+}
+
+static esp_err_t ble_connect_status_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    cJSON *status = ble_connect_flood_get_status_json();
+    return send_json_response(req, status);
 }
 
 static esp_err_t ble_l2cap_start_handler(httpd_req_t *req) {
@@ -1863,6 +1911,8 @@ void start_web_server(void) {
         httpd_register_uri_handler(server, &ble_connect_start_uri);
         httpd_uri_t ble_connect_stop_uri = { .uri = "/api/ble/connect/stop", .method = HTTP_POST, .handler = ble_connect_stop_handler };
         httpd_register_uri_handler(server, &ble_connect_stop_uri);
+        httpd_uri_t ble_connect_status_uri = { .uri = "/api/ble/connect/status", .method = HTTP_GET, .handler = ble_connect_status_handler };
+        httpd_register_uri_handler(server, &ble_connect_status_uri);
         httpd_uri_t ble_l2cap_start_uri = { .uri = "/api/ble/l2cap/start", .method = HTTP_POST, .handler = ble_l2cap_start_handler };
         httpd_register_uri_handler(server, &ble_l2cap_start_uri);
         httpd_uri_t ble_l2cap_stop_uri = { .uri = "/api/ble/l2cap/stop", .method = HTTP_POST, .handler = ble_l2cap_stop_handler };
