@@ -1081,6 +1081,16 @@ static esp_err_t ble_spam_stop_handler(httpd_req_t *req) {
     return send_success_response(req);
 }
 
+static esp_err_t ble_spam_status_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    cJSON *status = attack_bt_spam_get_status_json();
+    return send_json_response(req, status);
+}
+
 static esp_err_t ble_spoof_start_handler(httpd_req_t *req) {
     if (!request_is_authenticated(req)) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
@@ -1808,6 +1818,8 @@ void start_web_server(void) {
         httpd_register_uri_handler(server, &ble_spam_start_uri);
         httpd_uri_t ble_spam_stop_uri = { .uri = "/api/ble/spam/stop", .method = HTTP_POST, .handler = ble_spam_stop_handler };
         httpd_register_uri_handler(server, &ble_spam_stop_uri);
+        httpd_uri_t ble_spam_status_uri = { .uri = "/api/ble/spam/status", .method = HTTP_GET, .handler = ble_spam_status_handler };
+        httpd_register_uri_handler(server, &ble_spam_status_uri);
         httpd_uri_t ble_spoof_start_uri = { .uri = "/api/ble/spoof/start", .method = HTTP_POST, .handler = ble_spoof_start_handler };
         httpd_register_uri_handler(server, &ble_spoof_start_uri);
         httpd_uri_t ble_spoof_stop_uri = { .uri = "/api/ble/spoof/stop", .method = HTTP_POST, .handler = ble_spoof_stop_handler };
