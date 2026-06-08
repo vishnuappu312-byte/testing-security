@@ -1481,15 +1481,74 @@ static esp_err_t ble_deauth_start_handler(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
         return ESP_FAIL;
     }
-    char content[200];
+    char content[512];
     int ret = httpd_req_recv(req, content, sizeof(content) - 1);
     if (ret <= 0) return ESP_FAIL;
     content[ret] = '\0';
     cJSON *root = cJSON_Parse(content);
     if (!root) return ESP_FAIL;
-    cJSON *addr = cJSON_GetObjectItem(root, "addr");
-    const char *saddr = cJSON_IsString(addr) ? addr->valuestring : NULL;
-    ble_deauth_start(saddr);
+
+    cJSON *addr_json              = cJSON_GetObjectItem(root, "addr");
+    cJSON *timeout_json           = cJSON_GetObjectItem(root, "timeout_sec");
+    cJSON *conn_timeout_json      = cJSON_GetObjectItem(root, "connect_timeout_ms");
+    cJSON *jam_threshold_json     = cJSON_GetObjectItem(root, "jam_threshold");
+    cJSON *jam_rounds_json        = cJSON_GetObjectItem(root, "wifi_jam_rounds");
+    cJSON *spoof_dur_json         = cJSON_GetObjectItem(root, "spoof_duration_sec");
+    cJSON *post_disconnect_json   = cJSON_GetObjectItem(root, "post_disconnect_ms");
+    cJSON *backoff_json           = cJSON_GetObjectItem(root, "fail_backoff_ms");
+    cJSON *addr_type_json         = cJSON_GetObjectItem(root, "addr_type");
+    cJSON *rotate_mac_json        = cJSON_GetObjectItem(root, "rotate_own_mac");
+
+    const char *addr_str = cJSON_IsString(addr_json) ? addr_json->valuestring : NULL;
+    if (!addr_str || strlen(addr_str) < 1) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing target BLE address");
+        return ESP_FAIL;
+    }
+
+    ble_deauth_config_t cfg = {
+        .timeout_sec        = 300,
+        .connect_timeout_ms = 3000,
+        .jam_threshold      = 3,
+        .wifi_jam_rounds    = 3,
+        .spoof_duration_sec = 5,
+        .post_disconnect_ms = 200,
+        .fail_backoff_ms    = 2000,
+        .addr_type          = BLE_DEAUTH_ADDR_AUTO,
+        .rotate_own_mac     = true,
+    };
+    strncpy(cfg.target_addr, addr_str, sizeof(cfg.target_addr) - 1);
+    cfg.target_addr[sizeof(cfg.target_addr) - 1] = '\0';
+
+    if (cJSON_IsNumber(timeout_json) && timeout_json->valueint >= 30)
+        cfg.timeout_sec = (uint32_t)timeout_json->valueint;
+    if (cJSON_IsNumber(conn_timeout_json) && conn_timeout_json->valueint >= 1000)
+        cfg.connect_timeout_ms = (uint32_t)conn_timeout_json->valueint;
+    if (cJSON_IsNumber(jam_threshold_json) && jam_threshold_json->valueint >= 1)
+        cfg.jam_threshold = (uint32_t)jam_threshold_json->valueint;
+    if (cJSON_IsNumber(jam_rounds_json) && jam_rounds_json->valueint >= 1)
+        cfg.wifi_jam_rounds = (uint32_t)jam_rounds_json->valueint;
+    if (cJSON_IsNumber(spoof_dur_json) && spoof_dur_json->valueint >= 1)
+        cfg.spoof_duration_sec = (uint32_t)spoof_dur_json->valueint;
+    if (cJSON_IsNumber(post_disconnect_json) && post_disconnect_json->valueint >= 50)
+        cfg.post_disconnect_ms = (uint32_t)post_disconnect_json->valueint;
+    if (cJSON_IsNumber(backoff_json) && backoff_json->valueint >= 200)
+        cfg.fail_backoff_ms = (uint32_t)backoff_json->valueint;
+    if (cJSON_IsNumber(addr_type_json)) {
+        int at = addr_type_json->valueint;
+        if (at >= 0 && at <= 2)
+            cfg.addr_type = (ble_deauth_addr_type_t)at;
+    }
+    if (cJSON_IsBool(rotate_mac_json))
+        cfg.rotate_own_mac = rotate_mac_json->valueint == 1;
+
+    ble_deauth_init();
+    ble_deauth_start_config(&cfg);
+
+    ESP_LOGI(TAG, "BLE deauth started: target=%s timeout=%u addr_type=%d jam=%u rounds=%u",
+             cfg.target_addr, (unsigned)cfg.timeout_sec, cfg.addr_type,
+             (unsigned)cfg.jam_threshold, (unsigned)cfg.wifi_jam_rounds);
+
     cJSON_Delete(root);
     return send_success_response(req);
 }
@@ -1501,6 +1560,15 @@ static esp_err_t ble_deauth_stop_handler(httpd_req_t *req) {
     }
     ble_deauth_stop();
     return send_success_response(req);
+}
+
+static esp_err_t ble_deauth_status_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    cJSON *status = ble_deauth_get_status_json();
+    return send_json_response(req, status);
 }
 
 static esp_err_t ble_scan_api_handler(httpd_req_t *req) {
@@ -1758,6 +1826,10 @@ static esp_err_t status_api_handler(httpd_req_t *req) {
     }
     if (ble_deauth_is_running()) {
         cJSON_AddStringToObject(response, "ble_deauth", "BLE deauth active");
+        cJSON_AddNumberToObject(response, "ble_deauth_phase", ble_deauth_get_current_phase());
+        cJSON_AddNumberToObject(response, "ble_deauth_connects", ble_deauth_get_connect_count());
+        cJSON_AddNumberToObject(response, "ble_deauth_deauths", ble_deauth_get_deauth_count());
+        cJSON_AddNumberToObject(response, "ble_deauth_remaining", ble_deauth_get_remaining_sec());
     }
     if (ble_connect_flood_is_running()) {
         cJSON_AddStringToObject(response, "ble_connect", "BLE connect flood active");
@@ -2025,6 +2097,8 @@ void start_web_server(void) {
         httpd_register_uri_handler(server, &ble_deauth_start_uri);
         httpd_uri_t ble_deauth_stop_uri = { .uri = "/api/ble/deauth/stop", .method = HTTP_POST, .handler = ble_deauth_stop_handler };
         httpd_register_uri_handler(server, &ble_deauth_stop_uri);
+        httpd_uri_t ble_deauth_status_uri = { .uri = "/api/ble/deauth/status", .method = HTTP_GET, .handler = ble_deauth_status_handler };
+        httpd_register_uri_handler(server, &ble_deauth_status_uri);
         httpd_uri_t ble_passkey_start_uri = { .uri = "/api/ble/passkey/start", .method = HTTP_POST, .handler = ble_passkey_start_handler };
         httpd_register_uri_handler(server, &ble_passkey_start_uri);
         httpd_uri_t ble_passkey_stop_uri = { .uri = "/api/ble/passkey/stop", .method = HTTP_POST, .handler = ble_passkey_stop_handler };
