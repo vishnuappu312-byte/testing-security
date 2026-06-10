@@ -31,6 +31,7 @@
 #include "ble_passkey.h"
 #include "bt/ble_takeover.h"
 #include "ota_attack.h"
+#include "esp_system.h"     /* for esp_get_free_heap_size() */
 
 static const char *TAG = "WEB_SERVER";
 static httpd_handle_t server_handle = NULL;
@@ -1286,6 +1287,15 @@ static esp_err_t ble_l2cap_stop_handler(httpd_req_t *req) {
     return send_success_response(req);
 }
 
+static esp_err_t ble_l2cap_status_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    cJSON *status = ble_l2cap_flood_get_status_json();
+    return send_json_response(req, status);
+}
+
 static esp_err_t ble_gatt_start_handler(httpd_req_t *req) {
     if (!request_is_authenticated(req)) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
@@ -1338,6 +1348,15 @@ static esp_err_t ble_deauth_stop_handler(httpd_req_t *req) {
     }
     ble_deauth_stop();
     return send_success_response(req);
+}
+
+static esp_err_t ble_deauth_status_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    cJSON *status = ble_deauth_get_status_json();
+    return send_json_response(req, status);
 }
 
 static esp_err_t ble_scan_api_handler(httpd_req_t *req) {
@@ -1574,9 +1593,9 @@ static esp_err_t ota_start_handler(httpd_req_t *req) {
     ota_attack_config_t cfg = {0};
 
     cJSON *mode_json = cJSON_GetObjectItem(root, "mode");
-    if (!cJSON_IsNumber(mode_json) || mode_json->valueint < 0 || mode_json->valueint > 5) {
+    if (!cJSON_IsNumber(mode_json) || mode_json->valueint < 0 || mode_json->valueint > 8) {
         cJSON_Delete(root);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid or missing mode (0-5)");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid or missing mode (0-8)");
         return ESP_FAIL;
     }
     cfg.mode = (ota_attack_mode_t)mode_json->valueint;
@@ -1659,6 +1678,38 @@ static esp_err_t ota_start_handler(httpd_req_t *req) {
     if (cJSON_IsString(ghbranch_json)) strncpy(cfg.gh_branch, ghbranch_json->valuestring, sizeof(cfg.gh_branch) - 1);
     if (cJSON_IsString(ghcommit_json)) strncpy(cfg.gh_commit_msg, ghcommit_json->valuestring, sizeof(cfg.gh_commit_msg) - 1);
     if (cJSON_IsNumber(ghidx_json)) cfg.gh_captured_url_index = ghidx_json->valueint;
+
+    /* Provision sniff config */
+    cJSON *prov_port_json     = cJSON_GetObjectItem(root, "prov_sniff_port");
+    cJSON *prov_post_only_json = cJSON_GetObjectItem(root, "prov_capture_post_only");
+    cJSON *prov_auto_json     = cJSON_GetObjectItem(root, "prov_auto_parse_json");
+    cfg.prov_sniff_port       = cJSON_IsNumber(prov_port_json) ? (uint16_t)prov_port_json->valueint : 80;
+    cfg.prov_capture_post_only = cJSON_IsBool(prov_post_only_json) ? prov_post_only_json->valueint : true;
+    cfg.prov_auto_parse_json  = cJSON_IsBool(prov_auto_json) ? prov_auto_json->valueint : true;
+
+    /* Rogue broker config */
+    cJSON *rb_port_json       = cJSON_GetObjectItem(root, "rb_rogue_port");
+    cJSON *rb_broker_json     = cJSON_GetObjectItem(root, "rb_real_broker_ip");
+    cJSON *rb_bport_json      = cJSON_GetObjectItem(root, "rb_real_broker_port");
+    cJSON *rb_modify_json     = cJSON_GetObjectItem(root, "rb_modify_payloads");
+    cJSON *rb_mtopic_json     = cJSON_GetObjectItem(root, "rb_modify_topic");
+    cJSON *rb_mpayload_json   = cJSON_GetObjectItem(root, "rb_modify_payload");
+    cJSON *rb_arp_json        = cJSON_GetObjectItem(root, "rb_arp_spoof");
+    cfg.rb_rogue_port         = cJSON_IsNumber(rb_port_json) ? (uint16_t)rb_port_json->valueint : 1883;
+    if (cJSON_IsString(rb_broker_json)) strncpy(cfg.rb_real_broker_ip, rb_broker_json->valuestring, sizeof(cfg.rb_real_broker_ip) - 1);
+    cfg.rb_real_broker_port   = cJSON_IsNumber(rb_bport_json) ? (uint16_t)rb_bport_json->valueint : 1883;
+    cfg.rb_modify_payloads    = cJSON_IsBool(rb_modify_json) ? rb_modify_json->valueint : false;
+    if (cJSON_IsString(rb_mtopic_json)) strncpy(cfg.rb_modify_topic, rb_mtopic_json->valuestring, sizeof(cfg.rb_modify_topic) - 1);
+    if (cJSON_IsString(rb_mpayload_json)) strncpy(cfg.rb_modify_payload, rb_mpayload_json->valuestring, sizeof(cfg.rb_modify_payload) - 1);
+    cfg.rb_arp_spoof          = cJSON_IsBool(rb_arp_json) ? rb_arp_json->valueint : true;
+
+    /* Firmware analysis config */
+    cJSON *fw_idx_json        = cJSON_GetObjectItem(root, "fw_analyze_url_index");
+    cJSON *fw_deep_json       = cJSON_GetObjectItem(root, "fw_deep_scan");
+    cJSON *fw_strings_json    = cJSON_GetObjectItem(root, "fw_extract_strings");
+    cfg.fw_analyze_url_index  = cJSON_IsNumber(fw_idx_json) ? fw_idx_json->valueint : -1;
+    cfg.fw_deep_scan          = cJSON_IsBool(fw_deep_json) ? fw_deep_json->valueint : true;
+    cfg.fw_extract_strings    = cJSON_IsBool(fw_strings_json) ? fw_strings_json->valueint : true;
 
     ESP_LOGI(TAG, "Starting OTA attack: mode=%d ssid=%s broker=%s:%u",
              cfg.mode, cfg.wifi_ssid, cfg.mqtt_broker, cfg.mqtt_port);
@@ -2106,6 +2157,145 @@ static esp_err_t ota_github_result_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+/* ── Provision Sniffer Handlers ─────────────────────────────────── */
+
+static esp_err_t ota_prov_creds_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, ota_attack_get_prov_creds_json());
+    return ESP_OK;
+}
+
+static esp_err_t ota_prov_summary_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, ota_attack_get_prov_summary_json());
+    return ESP_OK;
+}
+
+static esp_err_t ota_prov_clear_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    ota_attack_clear_prov_creds();
+    return send_success_response(req);
+}
+
+/* ── Rogue Broker Handlers ──────────────────────────────────────── */
+
+static esp_err_t ota_mitm_messages_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, ota_attack_get_mitm_messages_json());
+    return ESP_OK;
+}
+
+static esp_err_t ota_rogue_broker_summary_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, ota_attack_get_rogue_broker_summary_json());
+    return ESP_OK;
+}
+
+static esp_err_t ota_mitm_modify_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    char content[768];
+    int ret = httpd_req_recv(req, content, sizeof(content) - 1);
+    if (ret <= 0) return ESP_FAIL;
+    content[ret] = '\0';
+
+    cJSON *root = cJSON_Parse(content);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *topic_json   = cJSON_GetObjectItem(root, "topic");
+    cJSON *payload_json = cJSON_GetObjectItem(root, "payload");
+    if (!cJSON_IsString(topic_json) || !cJSON_IsString(payload_json)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing topic or payload");
+        return ESP_FAIL;
+    }
+
+    bool ok = ota_attack_set_mitm_modify_rule(topic_json->valuestring, payload_json->valuestring);
+    cJSON_Delete(root);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "success", ok);
+    return send_json_response(req, resp);
+}
+
+static esp_err_t ota_mitm_clear_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    ota_attack_clear_mitm_messages();
+    return send_success_response(req);
+}
+
+/* ── Firmware Analysis Handlers ─────────────────────────────────── */
+
+static esp_err_t ota_fw_analyze_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    int found = ota_attack_analyze_firmware();
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "success", found > 0);
+    cJSON_AddNumberToObject(resp, "secrets_found", found);
+    return send_json_response(req, resp);
+}
+
+static esp_err_t ota_fw_secrets_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, ota_attack_get_fw_secrets_json());
+    return ESP_OK;
+}
+
+static esp_err_t ota_fw_summary_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, ota_attack_get_fw_analysis_summary_json());
+    return ESP_OK;
+}
+
+static esp_err_t ota_fw_clear_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    ota_attack_clear_fw_secrets();
+    return send_success_response(req);
+}
+
 static esp_err_t ota_chain_handler(httpd_req_t *req) {
     if (!request_is_authenticated(req)) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
@@ -2370,14 +2560,26 @@ static esp_err_t stop_all_handler(httpd_req_t *req) {
 /* ================================================================== */
 
 void start_web_server(void) {
+    /* Guard: don't start if already running */
+    if (server_handle != NULL) {
+        ESP_LOGW(TAG, "Web server already running, skipping.");
+        return;
+    }
+
+    /* Log free heap before server start for debugging */
+    ESP_LOGI(TAG, "Free heap before httpd_start: %u bytes", (unsigned)esp_get_free_heap_size());
+
     httpd_handle_t server = NULL;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.lru_purge_enable = true;
-    config.max_uri_handlers = 96;
+    config.max_uri_handlers = 102;      /* 100 + 2 new BLE status endpoints */
+    config.max_open_sockets = 4;         /* Reduced from default 7 to save heap */
     config.recv_wait_timeout = 10;
-    config.stack_size = 16384;
+    config.send_wait_timeout = 10;       /* Add send timeout to prevent socket leaks */
+    config.stack_size = 8192;            /* Reduced from 16384 — saves 8 KB heap */
     
     if (httpd_start(&server, &config) == ESP_OK) {
+        ESP_LOGI(TAG, "Web server started. Free heap after: %u bytes", (unsigned)esp_get_free_heap_size());
         server_handle = server;
 
         /* Core routes */
@@ -2497,6 +2699,8 @@ void start_web_server(void) {
         httpd_register_uri_handler(server, &ble_l2cap_start_uri);
         httpd_uri_t ble_l2cap_stop_uri = { .uri = "/api/ble/l2cap/stop", .method = HTTP_POST, .handler = ble_l2cap_stop_handler };
         httpd_register_uri_handler(server, &ble_l2cap_stop_uri);
+        httpd_uri_t ble_l2cap_status_uri = { .uri = "/api/ble/l2cap/status", .method = HTTP_GET, .handler = ble_l2cap_status_handler };
+        httpd_register_uri_handler(server, &ble_l2cap_status_uri);
         httpd_uri_t ble_gatt_start_uri = { .uri = "/api/ble/gatt/start", .method = HTTP_POST, .handler = ble_gatt_start_handler };
         httpd_register_uri_handler(server, &ble_gatt_start_uri);
         httpd_uri_t ble_gatt_stop_uri = { .uri = "/api/ble/gatt/stop", .method = HTTP_POST, .handler = ble_gatt_stop_handler };
@@ -2505,6 +2709,8 @@ void start_web_server(void) {
         httpd_register_uri_handler(server, &ble_deauth_start_uri);
         httpd_uri_t ble_deauth_stop_uri = { .uri = "/api/ble/deauth/stop", .method = HTTP_POST, .handler = ble_deauth_stop_handler };
         httpd_register_uri_handler(server, &ble_deauth_stop_uri);
+        httpd_uri_t ble_deauth_status_uri = { .uri = "/api/ble/deauth/status", .method = HTTP_GET, .handler = ble_deauth_status_handler };
+        httpd_register_uri_handler(server, &ble_deauth_status_uri);
         httpd_uri_t ble_passkey_start_uri = { .uri = "/api/ble/passkey/start", .method = HTTP_POST, .handler = ble_passkey_start_handler };
         httpd_register_uri_handler(server, &ble_passkey_start_uri);
         httpd_uri_t ble_passkey_stop_uri = { .uri = "/api/ble/passkey/stop", .method = HTTP_POST, .handler = ble_passkey_stop_handler };
@@ -2570,15 +2776,47 @@ void start_web_server(void) {
         httpd_register_uri_handler(server, &ota_github_result_uri);
         httpd_uri_t ota_chain_uri = { .uri = "/api/ota/chain", .method = HTTP_POST, .handler = ota_chain_handler };
         httpd_register_uri_handler(server, &ota_chain_uri);
+
+        /* OTA Provision Sniffer API */
+        httpd_uri_t ota_prov_creds_uri = { .uri = "/api/ota/prov/creds", .method = HTTP_GET, .handler = ota_prov_creds_handler };
+        httpd_register_uri_handler(server, &ota_prov_creds_uri);
+        httpd_uri_t ota_prov_summary_uri = { .uri = "/api/ota/prov/summary", .method = HTTP_GET, .handler = ota_prov_summary_handler };
+        httpd_register_uri_handler(server, &ota_prov_summary_uri);
+        httpd_uri_t ota_prov_clear_uri = { .uri = "/api/ota/prov/clear", .method = HTTP_POST, .handler = ota_prov_clear_handler };
+        httpd_register_uri_handler(server, &ota_prov_clear_uri);
+
+        /* OTA Rogue Broker API */
+        httpd_uri_t ota_mitm_msgs_uri = { .uri = "/api/ota/mitm/messages", .method = HTTP_GET, .handler = ota_mitm_messages_handler };
+        httpd_register_uri_handler(server, &ota_mitm_msgs_uri);
+        httpd_uri_t ota_rb_summary_uri = { .uri = "/api/ota/rogue-broker/summary", .method = HTTP_GET, .handler = ota_rogue_broker_summary_handler };
+        httpd_register_uri_handler(server, &ota_rb_summary_uri);
+        httpd_uri_t ota_mitm_modify_uri = { .uri = "/api/ota/mitm/modify", .method = HTTP_POST, .handler = ota_mitm_modify_handler };
+        httpd_register_uri_handler(server, &ota_mitm_modify_uri);
+        httpd_uri_t ota_mitm_clear_uri = { .uri = "/api/ota/mitm/clear", .method = HTTP_POST, .handler = ota_mitm_clear_handler };
+        httpd_register_uri_handler(server, &ota_mitm_clear_uri);
+
+        /* OTA Firmware Analysis API */
+        httpd_uri_t ota_fw_analyze_uri = { .uri = "/api/ota/firmware/analyze", .method = HTTP_POST, .handler = ota_fw_analyze_handler };
+        httpd_register_uri_handler(server, &ota_fw_analyze_uri);
+        httpd_uri_t ota_fw_secrets_uri = { .uri = "/api/ota/firmware/secrets", .method = HTTP_GET, .handler = ota_fw_secrets_handler };
+        httpd_register_uri_handler(server, &ota_fw_secrets_uri);
+        httpd_uri_t ota_fw_summary_uri = { .uri = "/api/ota/firmware/summary", .method = HTTP_GET, .handler = ota_fw_summary_handler };
+        httpd_register_uri_handler(server, &ota_fw_summary_uri);
+        httpd_uri_t ota_fw_clear_uri = { .uri = "/api/ota/firmware/clear", .method = HTTP_POST, .handler = ota_fw_clear_handler };
+        httpd_register_uri_handler(server, &ota_fw_clear_uri);
         
         ESP_LOGI(TAG, "==========================================");
-        ESP_LOGI(TAG, "Omega Solutions - Complete Security Suite v6.0");
+        ESP_LOGI(TAG, "Omega Solutions - Complete Security Suite v7.0");
         ESP_LOGI(TAG, "Web server started! Open http://192.168.4.1");
         ESP_LOGI(TAG, "Username: omega | Password: solutions123");
         ESP_LOGI(TAG, "WiFi: Deauth, Deauth Detect, Beacon, DoS, Handshake, PMKID, Probe, EvilTwin");
-        ESP_LOGI(TAG, "OTA: Sniff, Client, Inject, Fetch, Poll Sniff, GitHub Takeover, Full Chain");
+        ESP_LOGI(TAG, "OTA: Sniff, Client, Inject, Fetch, Poll Sniff, GitHub Takeover, Provision Sniff, Rogue Broker, Firmware Analyze");
         ESP_LOGI(TAG, "BLE: Spam, Scan, Spoof, Clone, Connect, L2CAP, GATT, Deauth, Passkey, Takeover");
         ESP_LOGI(TAG, "==========================================");
+    } else {
+        ESP_LOGE(TAG, "FAILED to start web server! Free heap: %u bytes. "
+                  "Reduce buffer sizes in ota_attack.h or webserver stack_size.",
+                  (unsigned)esp_get_free_heap_size());
     }
 }
 

