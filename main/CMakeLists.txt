@@ -33,6 +33,7 @@ idf_component_register(
         "bt/ble_deauth.c"
         "bt/ble_takeover.c"
         "bt/ble_passkey.c"
+        "ota/ota_attack.c"
 
     INCLUDE_DIRS
         "."
@@ -40,6 +41,8 @@ idf_component_register(
         "utils"
         "wifi"
         "bt"
+        "ota"
+
 
     REQUIRES
         nvs_flash
@@ -50,4 +53,7 @@ idf_component_register(
         json
         bt
         spiffs
+        esp_http_client
+        mqtt
+
 )

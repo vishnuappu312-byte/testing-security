@@ -28,6 +28,7 @@
 #include "bt/ble_deauth.h"
 #include "bt/ble_passkey.h"
 #include "bt/ble_takeover.h"
+#include "ota_attack.h"
 
 static const char *TAG = "MAIN";
 
@@ -70,6 +71,9 @@ void app_main(void) {
     ble_passkey_init();
     ble_takeover_init();
 
+    /* ---- OTA: Attack module ---- */
+    ota_attack_init();
+
     /* ---- Web server (serves dashboard + all API endpoints) ---- */
     start_web_server();
 
@@ -96,6 +100,13 @@ void app_main(void) {
     ESP_LOGI(TAG, "  BLE Deauth");
     ESP_LOGI(TAG, "  BLE Passkey Capture");
     ESP_LOGI(TAG, "  BLE Takeover");
+    ESP_LOGI(TAG, "OTA Attacks:");
+    ESP_LOGI(TAG, "  MQTT OTA Intercept (5 modes)");
+    ESP_LOGI(TAG, "  - SNIFF: Passive MQTT capture");
+    ESP_LOGI(TAG, "  - CLIENT: MQTT broker subscriber");
+    ESP_LOGI(TAG, "  - INJECT: Spoof OTA messages");
+    ESP_LOGI(TAG, "  - FETCH: Download firmware");
+    ESP_LOGI(TAG, "  - POLL_SNIFF: DNS/HTTP OTA sniff");
     ESP_LOGI(TAG, "=========================================");
     ESP_LOGI(TAG, "Connect to WiFi AP: %s", ssid);
     ESP_LOGI(TAG, "Open browser: http://192.168.4.1");

