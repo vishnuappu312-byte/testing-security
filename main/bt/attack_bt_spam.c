@@ -111,6 +111,19 @@ static int64_t               start_time_us   = 0;
 static int                   timeout_sec     = DEFAULT_TIMEOUT_SEC;
 static bt_spam_config_t      active_config   = {0};
 
+/* Scan results — used by init and scan APIs (must be above attack_bt_spam_init) */
+typedef struct {
+    char   addr[18];
+    int8_t rssi;
+    char   name[64];
+    char   adv_data[63];  /* Hex string of raw advertising data (max 31 bytes = 62 hex chars + NUL) */
+} scan_entry_t;
+
+#define MAX_SCAN_RESULTS  50
+static scan_entry_t         *scan_results = NULL;
+static uint8_t               scan_count   = 0;
+static SemaphoreHandle_t     scan_mutex   = NULL;
+
 /* ================================================================== */
 /*  Forward declarations                                               */
 /* ================================================================== */
@@ -642,18 +655,6 @@ cJSON *attack_bt_spam_get_status_json(void) {
 /* ================================================================== */
 /*  BLE Scan implementation                                            */
 /* ================================================================== */
-
-typedef struct {
-    char   addr[18];
-    int8_t rssi;
-    char   name[64];
-    char   adv_data[63];  /* Hex string of raw advertising data (max 31 bytes = 62 hex chars + NUL) */
-} scan_entry_t;
-
-#define MAX_SCAN_RESULTS  50
-static scan_entry_t *scan_results = NULL;
-static uint8_t       scan_count = 0;
-static SemaphoreHandle_t scan_mutex = NULL;
 
 static int scan_gap_cb(struct ble_gap_event *event, void *arg) {
     switch (event->type) {
