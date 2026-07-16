@@ -31,6 +31,9 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 static const char* TAG = "wifi_controller";
 /**
  * @brief Stores current state of Wi-Fi interface
@@ -261,4 +264,26 @@ void wifictl_mgmt_ap_stop(){
     ESP_LOGW(TAG, "Stopping Management AP...");
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+}
+
+void wifictl_prepare_for_scan(void)
+{
+    esp_wifi_set_promiscuous(false);
+    esp_wifi_set_promiscuous_rx_cb(NULL);
+    esp_wifi_scan_stop();
+
+    wifi_mode_t mode = WIFI_MODE_NULL;
+    esp_wifi_get_mode(&mode);
+    if (mode != WIFI_MODE_APSTA) {
+        ESP_LOGW(TAG, "Restoring APSTA for scan (mode was %d)", mode);
+        wifictl_mgmt_ap_start();
+        vTaskDelay(pdMS_TO_TICKS(250));
+    }
+
+    /* Attacks that call esp_wifi_stop() leave wifi_init=true — restart radio. */
+    esp_err_t err = esp_wifi_start();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_wifi_start during scan prep: %s", esp_err_to_name(err));
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));
 }

@@ -61,6 +61,10 @@ void attack_append_status_content(uint8_t *buffer, unsigned size){
 }
 
 char *attack_alloc_result_content(unsigned size) {
+    if (attack_status.content) {
+        free(attack_status.content);
+        attack_status.content = NULL;
+    }
     attack_status.content_size = size;
     attack_status.content = (char *) malloc(size);
     return attack_status.content;
@@ -104,6 +108,11 @@ static void attack_timeout(void* arg){
 
 static void attack_request_handler(void *args, esp_event_base_t event_base, int32_t event_id, void *event_data) {
     attack_request_t *attack_request = (attack_request_t *) event_data;
+
+    if (attack_status.state == RUNNING) {
+        ESP_LOGW(TAG, "Attack already running (type=%d); reject new request", attack_status.type);
+        return;
+    }
 
     bool needs_ap = (attack_request->type != ATTACK_TYPE_BEACON_SPAM) &&
     (attack_request->type != ATTACK_TYPE_PROBE);

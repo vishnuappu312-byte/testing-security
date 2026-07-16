@@ -45,6 +45,7 @@
 
 #include "ble_common.h"
 #include "cJSON.h"
+#include "heap_psram.h"
 
 static const char *TAG = "attack_bt_spam";
 
@@ -474,6 +475,15 @@ void attack_bt_spam_init(void) {
     if (task_exit_sem == NULL) {
         task_exit_sem = xSemaphoreCreateBinary();
     }
+    if (scan_mutex == NULL) {
+        scan_mutex = xSemaphoreCreateMutex();
+    }
+    if (!scan_results) {
+        scan_results = heap_psram_calloc(MAX_SCAN_RESULTS, sizeof(scan_entry_t));
+        if (!scan_results) {
+            ESP_LOGW(TAG, "PSRAM scan_results alloc failed");
+        }
+    }
 
     /* Create timeout timer (once) */
     if (timeout_timer == NULL) {
@@ -641,13 +651,19 @@ typedef struct {
 } scan_entry_t;
 
 #define MAX_SCAN_RESULTS  50
-static scan_entry_t  scan_results[MAX_SCAN_RESULTS];
+static scan_entry_t *scan_results = NULL;
 static uint8_t       scan_count = 0;
+static SemaphoreHandle_t scan_mutex = NULL;
 
 static int scan_gap_cb(struct ble_gap_event *event, void *arg) {
     switch (event->type) {
         case BLE_GAP_EVENT_DISC: {
-            if (scan_count >= MAX_SCAN_RESULTS) return 0;
+            if (!scan_results) return 0;
+            if (scan_mutex) xSemaphoreTake(scan_mutex, portMAX_DELAY);
+            if (scan_count >= MAX_SCAN_RESULTS) {
+                if (scan_mutex) xSemaphoreGive(scan_mutex);
+                return 0;
+            }
 
             struct ble_gap_disc_desc *desc = &event->disc;
 
@@ -673,6 +689,7 @@ static int scan_gap_cb(struct ble_gap_event *event, void *arg) {
                             }
                         }
                     }
+                    if (scan_mutex) xSemaphoreGive(scan_mutex);
                     return 0;
                 }
             }
@@ -707,6 +724,7 @@ static int scan_gap_cb(struct ble_gap_event *event, void *arg) {
             ESP_LOGD(TAG, "Found device: %s RSSI=%d name=%s",
                      addr_str, desc->rssi,
                      scan_results[scan_count - 1].name);
+            if (scan_mutex) xSemaphoreGive(scan_mutex);
             return 0;
         }
         case BLE_GAP_EVENT_DISC_COMPLETE:
@@ -729,8 +747,15 @@ cJSON *attack_bt_scan(int timeout_ms) {
         }
     }
 
+    if (!scan_results) {
+        ESP_LOGE(TAG, "Scan buffer not allocated");
+        return cJSON_CreateArray();
+    }
+
+    if (scan_mutex) xSemaphoreTake(scan_mutex, portMAX_DELAY);
     scan_count = 0;
-    memset(scan_results, 0, sizeof(scan_results));
+    memset(scan_results, 0, MAX_SCAN_RESULTS * sizeof(scan_entry_t));
+    if (scan_mutex) xSemaphoreGive(scan_mutex);
 
     /* Stop advertising if currently active */
     if (ble_gap_adv_active()) {
@@ -757,6 +782,7 @@ cJSON *attack_bt_scan(int timeout_ms) {
 
     /* Build JSON response */
     cJSON *arr = cJSON_CreateArray();
+    if (scan_mutex) xSemaphoreTake(scan_mutex, portMAX_DELAY);
     for (uint8_t i = 0; i < scan_count; i++) {
         cJSON *obj = cJSON_CreateObject();
         cJSON_AddStringToObject(obj, "addr",     scan_results[i].addr);
@@ -767,6 +793,7 @@ cJSON *attack_bt_scan(int timeout_ms) {
         }
         cJSON_AddItemToArray(arr, obj);
     }
+    if (scan_mutex) xSemaphoreGive(scan_mutex);
 
     ESP_LOGI(TAG, "BLE scan returning %u devices", scan_count);
     return arr;

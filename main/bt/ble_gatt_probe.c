@@ -43,6 +43,7 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "cJSON.h"
+#include "heap_psram.h"
 #include <string.h>
 
 /* NimBLE headers */
@@ -127,10 +128,10 @@ static volatile bool last_connect_ok    = false;
 static volatile int  last_conn_handle   = -1;
 static volatile uint8_t active_addr_type = BLE_ADDR_PUBLIC;
 
-/* Discovered items during the current connection */
-static discovered_svc_t disc_svcs[MAX_SERVICES_PER_CYCLE];
+/* Discovered items during the current connection (PSRAM) */
+static discovered_svc_t *disc_svcs = NULL;
 static volatile uint16_t disc_svc_count = 0;
-static discovered_chr_t disc_chrs[MAX_CHARS_PER_CYCLE];
+static discovered_chr_t *disc_chrs = NULL;
 static volatile uint16_t disc_chr_count = 0;
 
 /* Current discovery tracking (which service we are enumerating chars for) */
@@ -178,8 +179,8 @@ static void set_random_mac(void)
 {
     uint8_t rnd_addr[6];
     esp_fill_random(rnd_addr, sizeof(rnd_addr));
-    /* Set two LSBs of first byte for random static address (11) */
-    rnd_addr[0] |= 0xC0;
+    /* NimBLE stores MSB in val[5]; random static requires top two bits = 11 */
+    rnd_addr[5] = (rnd_addr[5] & 0x3F) | 0xC0;
     int rc = ble_hs_id_set_rnd(rnd_addr);
     if (rc != 0) {
         ESP_LOGD(TAG, "ble_hs_id_set_rnd failed: %d", rc);
@@ -276,7 +277,7 @@ static int gatt_disc_svc_cb(uint16_t conn_handle,
 
     if (error->status == 0 && svc != NULL) {
         uint16_t idx = disc_svc_count;
-        if (idx < MAX_SERVICES_PER_CYCLE) {
+        if (disc_svcs && idx < MAX_SERVICES_PER_CYCLE) {
             disc_svcs[idx].start_handle = svc->start_handle;
             disc_svcs[idx].end_handle   = svc->end_handle;
             memcpy(&disc_svcs[idx].uuid, &svc->uuid, sizeof(ble_uuid_any_t));
@@ -311,7 +312,7 @@ static int gatt_disc_chr_cb(uint16_t conn_handle,
 
     if (error->status == 0 && chr != NULL) {
         uint16_t idx = disc_chr_count;
-        if (idx < MAX_CHARS_PER_CYCLE) {
+        if (disc_chrs && idx < MAX_CHARS_PER_CYCLE) {
             disc_chrs[idx].val_handle  = chr->val_handle;
             disc_chrs[idx].decl_handle = chr->def_handle;
             disc_chrs[idx].properties  = chr->properties;
@@ -422,9 +423,11 @@ static bool probe_connection(uint16_t conn_handle)
 {
     int rc;
 
+    if (!disc_svcs || !disc_chrs) return false;
+
     /* ---- Step 1: Discover all primary services ---- */
     disc_svc_count = 0;
-    memset((void *)disc_svcs, 0, sizeof(disc_svcs));
+    memset((void *)disc_svcs, 0, MAX_SERVICES_PER_CYCLE * sizeof(discovered_svc_t));
 
     rc = ble_gattc_disc_all_svcs(conn_handle, gatt_disc_svc_cb, NULL);
     if (rc != 0) {
@@ -449,7 +452,8 @@ static bool probe_connection(uint16_t conn_handle)
 
     /* ---- Step 2: For each service, discover characteristics ---- */
     disc_chr_count = 0;
-    memset((void *)disc_chrs, 0, sizeof(disc_chrs));
+    if (!disc_svcs || !disc_chrs) return false;
+    memset((void *)disc_chrs, 0, MAX_CHARS_PER_CYCLE * sizeof(discovered_chr_t));
 
     for (uint16_t s = 0; s < disc_svc_count && running; s++) {
         disc_svc_idx = s;
@@ -616,7 +620,12 @@ static void probe_task(void *arg)
         last_connect_ok  = false;
         last_conn_handle = -1;
 
-        int rc = ble_gap_connect(use_addr_type, &target_ble_addr,
+        /* First arg is OWN address type; peer type is already in target_ble_addr.type */
+        uint8_t own_addr_type = cfg.rotate_own_mac
+                                    ? BLE_OWN_ADDR_RANDOM
+                                    : ble_common_own_addr_type();
+
+        int rc = ble_gap_connect(own_addr_type, &target_ble_addr,
                                  cfg.connect_timeout_ms,
                                  NULL, gap_event_cb, NULL);
         if (rc != 0) {
@@ -698,16 +707,27 @@ void ble_gatt_probe_init(void)
 {
     ble_common_init();
 
-    mutex = xSemaphoreCreateMutex();
-    probe_sem     = xSemaphoreCreateBinary();
-    task_exit_sem = xSemaphoreCreateBinary();
+    if (mutex == NULL)         mutex = xSemaphoreCreateMutex();
+    if (probe_sem == NULL)     probe_sem = xSemaphoreCreateBinary();
+    if (task_exit_sem == NULL) task_exit_sem = xSemaphoreCreateBinary();
 
-    /* Create one-shot timeout timer */
-    esp_timer_create_args_t timer_args = {
-        .callback = timeout_cb,
-        .name     = "gatt_probe_timeout",
-    };
-    esp_timer_create(&timer_args, &timeout_timer);
+    if (!disc_svcs) {
+        disc_svcs = heap_psram_calloc(MAX_SERVICES_PER_CYCLE, sizeof(discovered_svc_t));
+    }
+    if (!disc_chrs) {
+        disc_chrs = heap_psram_calloc(MAX_CHARS_PER_CYCLE, sizeof(discovered_chr_t));
+    }
+    if (!disc_svcs || !disc_chrs) {
+        ESP_LOGW(TAG, "PSRAM discovery buffer alloc failed");
+    }
+
+    if (timeout_timer == NULL) {
+        esp_timer_create_args_t timer_args = {
+            .callback = timeout_cb,
+            .name     = "gatt_probe_timeout",
+        };
+        esp_timer_create(&timer_args, &timeout_timer);
+    }
 
     ESP_LOGI(TAG, "ble_gatt_probe initialized");
 }

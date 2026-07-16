@@ -39,6 +39,8 @@ static bool              is_running      = false;
 static attack_dos_methods_t cur_method   = ATTACK_DOS_METHOD_NONE;
 static bool              timeout_occurred= false;
 static esp_timer_handle_t timeout_timer  = NULL;
+static esp_timer_handle_t timeout_orphan = NULL;
+static bool dos_in_timeout_cb = false;
 
 /* Target info for status reporting */
 static char    target_ssid[33]     = {0};   /* max 32 chars + null */
@@ -77,10 +79,16 @@ static void dos_timeout_cb(void *arg) {
         timeout_occurred = true;
         dos_mutex_give();
     }
+    dos_in_timeout_cb = true;
     attack_dos_stop();
+    dos_in_timeout_cb = false;
 }
 
 static void dos_timeout_start(void) {
+    if (timeout_orphan != NULL) {
+        esp_timer_delete(timeout_orphan);
+        timeout_orphan = NULL;
+    }
     if (timeout_timer != NULL) {
         esp_timer_stop(timeout_timer);
         esp_timer_delete(timeout_timer);
@@ -97,8 +105,17 @@ static void dos_timeout_start(void) {
 static void dos_timeout_stop(void) {
     if (timeout_timer != NULL) {
         esp_timer_stop(timeout_timer);
-        esp_timer_delete(timeout_timer);
-        timeout_timer = NULL;
+        if (dos_in_timeout_cb) {
+            timeout_orphan = timeout_timer;
+            timeout_timer = NULL;
+        } else {
+            esp_timer_delete(timeout_timer);
+            timeout_timer = NULL;
+        }
+    }
+    if (!dos_in_timeout_cb && timeout_orphan != NULL) {
+        esp_timer_delete(timeout_orphan);
+        timeout_orphan = NULL;
     }
 }
 

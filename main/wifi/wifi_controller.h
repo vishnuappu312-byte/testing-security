@@ -118,6 +118,11 @@ esp_err_t wifictl_mgmt_ap_set_creds(const char *ssid, const char *pass);
  */
 esp_err_t wifictl_mgmt_ap_clear_creds(void);
 
-
+/**
+ * @brief Restore radio to a scan-ready state (APSTA, promiscuous off).
+ *
+ * Call before esp_wifi_scan_start() after attacks, sniffing, or injection.
+ */
+void wifictl_prepare_for_scan(void);
 
 #endif

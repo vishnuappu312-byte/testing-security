@@ -18,7 +18,7 @@
  * @param frame_buffer 
  * @param size size of frame buffer
  */
-void wsl_bypasser_send_raw_frame(const uint8_t *frame_buffer, int size);
+bool wsl_bypasser_send_raw_frame(const uint8_t *frame_buffer, int size);
 
 /**
  * @brief Sends deauthentication frame with forged source AP from given ap_record

@@ -17,6 +17,18 @@
 #include "esp_wifi_types.h"
 
 static const char *TAG = "wsl_bypasser";
+
+/*
+ * Override ESP-IDF libnet80211 sanity check so deauth/disassoc frames
+ * can be sent via esp_wifi_80211_tx. Requires -Wl,-zmuldefs at link time.
+ */
+int ieee80211_raw_frame_sanity_check(int32_t arg, int32_t arg2, int32_t arg3)
+{
+    (void)arg;
+    (void)arg2;
+    (void)arg3;
+    return 0;
+}
 /**
  * @brief Deauthentication frame template
  * 
@@ -33,13 +45,17 @@ static const uint8_t deauth_frame_default[] = {
     0xf0, 0xff, 0x02, 0x00
 };
 
-void wsl_bypasser_send_raw_frame(const uint8_t *frame_buffer, int size){
-
+bool wsl_bypasser_send_raw_frame(const uint8_t *frame_buffer, int size)
+{
     esp_err_t err = esp_wifi_80211_tx(WIFI_IF_STA, frame_buffer, size, false);
-
+    if (err != ESP_OK) {
+        err = esp_wifi_80211_tx(WIFI_IF_AP, frame_buffer, size, false);
+    }
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Raw frame TX failed! Error: %s", esp_err_to_name(err));
+        return false;
     }
+    return true;
 }
 
 void wsl_bypasser_send_deauth_frame(const wifi_ap_record_t *ap_record){
@@ -89,7 +105,14 @@ void wsl_bypasser_send_beacon_frame(uint8_t *bssid, uint8_t *ssid, uint8_t ssid_
     memcpy(&beacon_frame[10], bssid, 6);
     memcpy(&beacon_frame[16], bssid, 6);
 
-    // Insert SSID
+    // Insert SSID (cap to fit beacon_frame[128]: 38 + ssid + 3 channel IE)
+    if (ssid_length > 32) {
+        ssid_length = 32;
+    }
+    if (38 + ssid_length + 3 > sizeof(beacon_frame)) {
+        ESP_LOGE(TAG, "SSID too long for beacon buffer");
+        return;
+    }
     beacon_frame[37] = ssid_length;
     memcpy(&beacon_frame[38], ssid, ssid_length);
 

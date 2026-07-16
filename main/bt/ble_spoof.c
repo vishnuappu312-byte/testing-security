@@ -210,7 +210,8 @@ static int adv_event_cb(struct ble_gap_event *event, void *arg) {
  */
 static void build_name_adv_payload(const char *name, uint8_t *out, size_t *out_len) {
     size_t n = name ? strlen(name) : 0;
-    if (n > 29) n = 29;  /* 31 - 2 (flags field) */
+    /* Flags(3) + name len+type(2) = 5 overhead → max name = 26 */
+    if (n > 26) n = 26;
     size_t idx = 0;
 
     /* Flags: LE General Discoverable + BR/EDR Not Supported */

@@ -33,6 +33,7 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "cJSON.h"
+#include "heap_psram.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -146,9 +147,9 @@ typedef struct {
     int svc_idx;
 } chr_entry_t;
 
-static svc_entry_t svcs[MAX_SERVICES];
+static svc_entry_t *svcs = NULL;
 static int svc_count = 0;
-static chr_entry_t chrs[MAX_CHARS];
+static chr_entry_t *chrs = NULL;
 static int chr_count = 0;
 static int disc_svc_idx = 0;
 
@@ -159,9 +160,14 @@ typedef struct {
     int64_t  timestamp_ms;
 } notif_entry_t;
 
-static notif_entry_t notif_log[MAX_NOTIF_LOG];
+static notif_entry_t *notif_log = NULL;
 static int notif_count = 0;
 static int notif_head  = 0;
+
+#define TAKEOVER_SVC_JSON_SZ   6144
+#define TAKEOVER_NOTIF_JSON_SZ 4096
+static char *services_json_buf = NULL;
+static char *notif_json_buf = NULL;
 
 /* ---- Read result ---- */
 static SemaphoreHandle_t read_sem = NULL;
@@ -304,15 +310,20 @@ static int hex_to_bytes(const char *hex, uint8_t *out, size_t out_len)
 
 static void store_notification(uint16_t handle, const uint8_t *data, int len)
 {
+    if (!notif_log) return;
     notif_entry_t *slot = &notif_log[notif_head];
     slot->handle = handle;
     slot->timestamp_ms = now_ms();
 
+    int n = len;
+    if (n < 0) n = 0;
+    if (n > 127) n = 127; /* value_hex[256] holds 127 bytes as hex + NUL */
+
     slot->value_hex[0] = '\0';
-    for (int i = 0; i < len && i < 127; i++) {
+    for (int i = 0; i < n; i++) {
         sprintf(slot->value_hex + i * 2, "%02x", data[i]);
     }
-    slot->value_hex[len * 2] = '\0';
+    slot->value_hex[n * 2] = '\0';
 
     notif_head = (notif_head + 1) % MAX_NOTIF_LOG;
     if (notif_count < MAX_NOTIF_LOG) notif_count++;
@@ -393,7 +404,7 @@ static int svc_disc_cb(uint16_t ch, const struct ble_gatt_error *error,
                        const struct ble_gatt_svc *svc, void *arg)
 {
     if (error->status == 0) {
-        if (svc_count < MAX_SERVICES) {
+        if (svcs && svc_count < MAX_SERVICES) {
             svcs[svc_count].start_handle = svc->start_handle;
             svcs[svc_count].end_handle   = svc->end_handle;
             memcpy(&svcs[svc_count].uuid, &svc->uuid, sizeof(ble_uuid_any_t));
@@ -422,17 +433,12 @@ static int svc_disc_cb(uint16_t ch, const struct ble_gatt_error *error,
 
 static void start_next_chr_disc(void)
 {
-    if (disc_svc_idx >= svc_count) {
+    if (!svcs || disc_svc_idx >= svc_count) {
         ESP_LOGI(TAG, "Discovery complete: %d svcs, %d chrs", svc_count, chr_count);
-
-        /* Auto-enable notifications on all N/I characteristics */
-        if (cfg.auto_enable_notifies) {
-            auto_enable_notifies();
-        }
 
         takeover_state = BLE_TAKEOVER_CONNECTED;
 
-        /* Signal that discovery is done */
+        /* Signal that discovery is done; task enables CCCDs (avoids host-task delay) */
         if (conn_done_sem) xSemaphoreGive(conn_done_sem);
         return;
     }
@@ -452,7 +458,7 @@ static int chr_disc_cb(uint16_t ch, const struct ble_gatt_error *error,
                        const struct ble_gatt_chr *chr, void *arg)
 {
     if (error->status == 0) {
-        if (chr_count < MAX_CHARS) {
+        if (chrs && svcs && chr_count < MAX_CHARS) {
             chrs[chr_count].handle     = chr->def_handle;
             chrs[chr_count].val_handle = chr->val_handle;
             chrs[chr_count].cccd_handle = chr->val_handle + 1;  /* CCCD typically right after */
@@ -485,6 +491,7 @@ static int chr_disc_cb(uint16_t ch, const struct ble_gatt_error *error,
 
 static void auto_enable_notifies(void)
 {
+    if (!chrs) return;
     int enabled = 0;
     for (int i = 0; i < chr_count; i++) {
         if (chrs[i].properties & (BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_INDICATE)) {
@@ -533,10 +540,12 @@ static int read_cb(uint16_t ch, const struct ble_gatt_error *error,
         if (clen < 0) clen = 0;
 
         read_value_hex[0] = '\0';
-        for (int i = 0; i < clen && i < MAX_READ_LEN; i++) {
+        int n = clen;
+        if (n > 127) n = 127;
+        for (int i = 0; i < n; i++) {
             sprintf(read_value_hex + i * 2, "%02x", data[i]);
         }
-        read_value_hex[clen * 2] = '\0';
+        read_value_hex[n * 2] = '\0';
         read_success = true;
         read_count++;
         ESP_LOGI(TAG, "Read handle %d: %s", attr->handle, read_value_hex);
@@ -784,7 +793,9 @@ static void takeover_task(void *arg)
 
         xSemaphoreTake(conn_done_sem, 0);
 
-        uint8_t own_addr_type = ble_common_own_addr_type();
+        uint8_t own_addr_type = cfg.rotate_own_mac
+                                    ? BLE_OWN_ADDR_RANDOM
+                                    : ble_common_own_addr_type();
 
         ESP_LOGI(TAG, "Connecting to %s (addr_type=%s, attempt %d/%d)...",
                  cfg.target_addr,
@@ -828,11 +839,17 @@ static void takeover_task(void *arg)
             }
 
             if (takeover_state == BLE_TAKEOVER_CONNECTED) {
+                if (cfg.auto_enable_notifies) {
+                    auto_enable_notifies();
+                }
                 connected = true;
                 break;
             }
         } else if (takeover_state == BLE_TAKEOVER_CONNECTED) {
             /* Connected + auto-discovery already done (no services found) */
+            if (cfg.auto_enable_notifies) {
+                auto_enable_notifies();
+            }
             connected = true;
             break;
         } else if (takeover_state == BLE_TAKEOVER_DISCONNECTED) {
@@ -911,19 +928,29 @@ void ble_takeover_init(void)
 {
     ble_common_init();
 
-    mutex         = xSemaphoreCreateMutex();
-    conn_done_sem = xSemaphoreCreateBinary();
-    task_exit_sem = xSemaphoreCreateBinary();
-    read_sem      = xSemaphoreCreateBinary();
-    write_sem     = xSemaphoreCreateBinary();
-    cccd_sem      = xSemaphoreCreateBinary();
+    if (mutex == NULL)         mutex = xSemaphoreCreateMutex();
+    if (conn_done_sem == NULL) conn_done_sem = xSemaphoreCreateBinary();
+    if (task_exit_sem == NULL) task_exit_sem = xSemaphoreCreateBinary();
+    if (read_sem == NULL)      read_sem = xSemaphoreCreateBinary();
+    if (write_sem == NULL)     write_sem = xSemaphoreCreateBinary();
+    if (cccd_sem == NULL)      cccd_sem = xSemaphoreCreateBinary();
 
-    /* Create one-shot timeout timer */
-    esp_timer_create_args_t timer_args = {
-        .callback = timeout_cb,
-        .name     = "ble_takeover_timeout",
-    };
-    esp_timer_create(&timer_args, &timeout_timer);
+    if (!svcs)  svcs = heap_psram_calloc(MAX_SERVICES, sizeof(svc_entry_t));
+    if (!chrs)  chrs = heap_psram_calloc(MAX_CHARS, sizeof(chr_entry_t));
+    if (!notif_log) notif_log = heap_psram_calloc(MAX_NOTIF_LOG, sizeof(notif_entry_t));
+    if (!services_json_buf) services_json_buf = heap_psram_malloc(TAKEOVER_SVC_JSON_SZ);
+    if (!notif_json_buf) notif_json_buf = heap_psram_malloc(TAKEOVER_NOTIF_JSON_SZ);
+    if (!svcs || !chrs || !notif_log || !services_json_buf || !notif_json_buf) {
+        ESP_LOGW(TAG, "PSRAM buffer alloc incomplete");
+    }
+
+    if (timeout_timer == NULL) {
+        esp_timer_create_args_t timer_args = {
+            .callback = timeout_cb,
+            .name     = "ble_takeover_timeout",
+        };
+        esp_timer_create(&timer_args, &timeout_timer);
+    }
 
     ESP_LOGI(TAG, "ble_takeover initialized (connect + discover + notify)");
 }
@@ -1237,6 +1264,7 @@ bool ble_takeover_enable_notify(uint16_t val_handle, bool enable)
     if (takeover_state != BLE_TAKEOVER_CONNECTED || active_conn_handle == 0xFFFF) {
         return false;
     }
+    if (!chrs) return false;
 
     /* Find the characteristic and its CCCD handle */
     chr_entry_t *chr_ptr = NULL;
@@ -1296,59 +1324,63 @@ bool ble_takeover_enable_notify(uint16_t val_handle, bool enable)
 
 const char *ble_takeover_get_services_json(void)
 {
-    static char buf[6144];
+    char *buf = services_json_buf;
+    if (!buf || !svcs || !chrs) return "{\"state\":\"error\",\"services\":[]}";
     int o = 0;
+    const int cap = TAKEOVER_SVC_JSON_SZ;
 
-    o += snprintf(buf + o, sizeof(buf) - o,
+    o += snprintf(buf + o, cap - o,
                   "{\"state\":\"%s\",\"addr\":\"%s\",\"services\":[",
                   ble_takeover_get_state_str(),
                   cfg.target_addr[0] ? cfg.target_addr : "");
 
-    for (int i = 0; i < svc_count && o < (int)sizeof(buf) - 200; i++) {
-        if (i > 0) o += snprintf(buf + o, sizeof(buf) - o, ",");
+    for (int i = 0; i < svc_count && o < cap - 200; i++) {
+        if (i > 0) o += snprintf(buf + o, cap - o, ",");
         char uuid_str[40];
         uuid_to_str(&svcs[i].uuid, uuid_str, sizeof(uuid_str));
-        o += snprintf(buf + o, sizeof(buf) - o,
+        o += snprintf(buf + o, cap - o,
                       "{\"uuid\":\"%s\",\"start\":%d,\"end\":%d,\"chars\":[",
                       uuid_str, svcs[i].start_handle, svcs[i].end_handle);
 
         int first = 1;
-        for (int j = 0; j < chr_count && o < (int)sizeof(buf) - 200; j++) {
+        for (int j = 0; j < chr_count && o < cap - 200; j++) {
             if (chrs[j].svc_idx != i) continue;
-            if (!first) o += snprintf(buf + o, sizeof(buf) - o, ",");
+            if (!first) o += snprintf(buf + o, cap - o, ",");
             first = 0;
 
             char cuuid[40], props[8];
             uuid_to_str(&chrs[j].uuid, cuuid, sizeof(cuuid));
             props_to_str(chrs[j].properties, props, sizeof(props));
-            o += snprintf(buf + o, sizeof(buf) - o,
+            o += snprintf(buf + o, cap - o,
                           "{\"uuid\":\"%s\",\"handle\":%d,\"val\":%d,\"cccd\":%d,\"props\":\"%s\",\"notify\":%s}",
                           cuuid, chrs[j].handle, chrs[j].val_handle,
                           chrs[j].cccd_handle, props,
                           chrs[j].notify_enabled ? "true" : "false");
         }
 
-        o += snprintf(buf + o, sizeof(buf) - o, "]}");
+        o += snprintf(buf + o, cap - o, "]}");
     }
 
-    o += snprintf(buf + o, sizeof(buf) - o, "]}");
+    o += snprintf(buf + o, cap - o, "]}");
     return buf;
 }
 
 const char *ble_takeover_get_notifications_json(void)
 {
-    static char buf[4096];
+    char *buf = notif_json_buf;
+    if (!buf || !notif_log) return "{\"count\":0,\"entries\":[]}";
     int o = 0;
+    const int cap = TAKEOVER_NOTIF_JSON_SZ;
 
-    o += snprintf(buf + o, sizeof(buf) - o, "{\"count\":%d,\"entries\":[", notif_count);
+    o += snprintf(buf + o, cap - o, "{\"count\":%d,\"entries\":[", notif_count);
 
     if (notif_count > 0) {
         /* Output in order: oldest to newest */
         int start = (notif_count < MAX_NOTIF_LOG) ? 0 : notif_head;
-        for (int i = 0; i < notif_count && o < (int)sizeof(buf) - 200; i++) {
+        for (int i = 0; i < notif_count && o < cap - 200; i++) {
             int idx = (start + i) % MAX_NOTIF_LOG;
-            if (i > 0) o += snprintf(buf + o, sizeof(buf) - o, ",");
-            o += snprintf(buf + o, sizeof(buf) - o,
+            if (i > 0) o += snprintf(buf + o, cap - o, ",");
+            o += snprintf(buf + o, cap - o,
                           "{\"handle\":%d,\"value\":\"%s\",\"time\":%lld}",
                           notif_log[idx].handle,
                           notif_log[idx].value_hex,
@@ -1356,6 +1388,6 @@ const char *ble_takeover_get_notifications_json(void)
         }
     }
 
-    o += snprintf(buf + o, sizeof(buf) - o, "]}");
+    o += snprintf(buf + o, cap - o, "]}");
     return buf;
 }

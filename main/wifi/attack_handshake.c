@@ -71,6 +71,8 @@ static bool timeout_occurred                     = false;
 /* ── Timer ──────────────────────────────────────────────────── */
 
 static esp_timer_handle_t handshake_timeout_timer = NULL;
+static esp_timer_handle_t handshake_timeout_orphan = NULL; /* deferred delete after timeout CB */
+static bool handshake_in_timeout_cb = false;
 
 /* ── Monitor task handle ────────────────────────────────────── */
 
@@ -85,7 +87,9 @@ static void handshake_timeout_cb(void *arg)
     ESP_LOGW(TAG, "Handshake TIMEOUT after %d seconds!", HANDSHAKE_TIMEOUT_SEC);
     timeout_occurred = true;
     attack_update_status(FINISHED);
+    handshake_in_timeout_cb = true;
     attack_handshake_stop();
+    handshake_in_timeout_cb = false;
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -244,6 +248,10 @@ void attack_handshake_start(attack_config_t *attack_config)
     event_handler_registered = true;
 
     /* ── Start timeout timer ─────────────────────────────────── */
+    if (handshake_timeout_orphan) {
+        esp_timer_delete(handshake_timeout_orphan);
+        handshake_timeout_orphan = NULL;
+    }
     if (handshake_timeout_timer) {
         esp_timer_stop(handshake_timeout_timer);
         esp_timer_delete(handshake_timeout_timer);
@@ -312,8 +320,18 @@ void attack_handshake_stop(void)
     /* ── Stop timeout timer first ────────────────────────────── */
     if (handshake_timeout_timer) {
         esp_timer_stop(handshake_timeout_timer);
-        esp_timer_delete(handshake_timeout_timer);
-        handshake_timeout_timer = NULL;
+        if (handshake_in_timeout_cb) {
+            /* Cannot delete from own callback — defer */
+            handshake_timeout_orphan = handshake_timeout_timer;
+            handshake_timeout_timer = NULL;
+        } else {
+            esp_timer_delete(handshake_timeout_timer);
+            handshake_timeout_timer = NULL;
+        }
+    }
+    if (!handshake_in_timeout_cb && handshake_timeout_orphan) {
+        esp_timer_delete(handshake_timeout_orphan);
+        handshake_timeout_orphan = NULL;
     }
 
     /* ── Mark as stopped ─────────────────────────────────────── */
@@ -563,12 +581,10 @@ cJSON *attack_handshake_get_status_json(void)
 
 size_t attack_handshake_get_pcap_size(void)
 {
-    /* pcap_serializer should provide this; if not available return 0 */
-    return 0;  /* TODO: implement if pcap_serializer_get_size() exists */
+    return (size_t)pcap_serializer_get_size();
 }
 
 const uint8_t *attack_handshake_get_pcap_data(void)
 {
-    /* pcap_serializer should provide this; if not available return NULL */
-    return NULL;  /* TODO: implement if pcap_serializer_get_buffer() exists */
+    return pcap_serializer_get_buffer();
 }

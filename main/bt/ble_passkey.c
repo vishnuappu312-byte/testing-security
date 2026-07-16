@@ -415,9 +415,8 @@ static int passkey_gap_cb(struct ble_gap_event *event, void *arg)
             ESP_LOGI(TAG, "===========================================");
             pairing_complete = true;
 
-            /* Optionally disconnect after capture */
+            /* Optionally disconnect after capture — never delay in GAP callback */
             if (cfg.auto_disconnect) {
-                vTaskDelay(pdMS_TO_TICKS(1000));
                 if (active_conn_handle != 0xFFFF) {
                     ble_gap_terminate(active_conn_handle,
                                       BLE_ERR_REM_USER_CONN_TERM);
@@ -592,8 +591,8 @@ void ble_passkey_init(void)
 {
     ble_common_init();
 
-    mutex         = xSemaphoreCreateMutex();
-    task_exit_sem = xSemaphoreCreateBinary();
+    if (mutex == NULL)         mutex = xSemaphoreCreateMutex();
+    if (task_exit_sem == NULL) task_exit_sem = xSemaphoreCreateBinary();
 
     /* Register GATT services once (idempotent) */
     if (!gatt_registered) {

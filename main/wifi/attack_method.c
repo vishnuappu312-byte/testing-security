@@ -47,26 +47,39 @@ static void timer_send_deauth_frame(void *arg) {
     wsl_bypasser_send_deauth_frame(ap);
 }
 
+static wifi_ap_record_t deauth_targets[MAX_ATTACK_TARGETS];
 static esp_timer_handle_t deauth_timer_handles[MAX_ATTACK_TARGETS];
 static uint8_t active_timers = 0;
 
 void attack_method_broadcast(const wifi_ap_record_t *ap_record, unsigned period_sec) {
     esp_wifi_set_ps(WIFI_PS_NONE);
+    if (ap_record == NULL) {
+        return;
+    }
     if (active_timers >= MAX_ATTACK_TARGETS) {
         ESP_LOGW(TAG, "Max targets reached, skipping AP: %s", ap_record->ssid);
         return;
     }
 
+    /* Own a copy — ap_records[] can be overwritten by a later scan */
+    memcpy(&deauth_targets[active_timers], ap_record, sizeof(wifi_ap_record_t));
+
     const esp_timer_create_args_t deauth_timer_args = {
         .callback = &timer_send_deauth_frame,
-        .arg = (void *) ap_record
+        .arg = (void *) &deauth_targets[active_timers]
     };
 
+    uint64_t period_us = (uint64_t)period_sec * 1000000ULL;
+    if (period_us < 100000ULL) {
+        period_us = 100000ULL; /* minimum 100 ms */
+    }
+
     ESP_ERROR_CHECK(esp_timer_create(&deauth_timer_args, &deauth_timer_handles[active_timers]));
-    ESP_ERROR_CHECK(esp_timer_start_periodic(deauth_timer_handles[active_timers], 100000));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(deauth_timer_handles[active_timers], period_us));
 
     active_timers++;
-    ESP_LOGD(TAG, "Timer started for BSSID: %02x:%02x...", ap_record->bssid[0], ap_record->bssid[1]);
+    ESP_LOGD(TAG, "Timer started for BSSID: %02x:%02x... period=%us",
+             ap_record->bssid[0], ap_record->bssid[1], period_sec);
 }
 
 void attack_method_broadcast_stop() {

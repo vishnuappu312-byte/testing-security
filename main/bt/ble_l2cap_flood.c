@@ -428,8 +428,8 @@ static void l2cap_flood_task(void *arg)
                     }
                 }
 
-                /* Wait for DISCONNECT event */
-                if (conn_done_sem && last_conn_handle >= 0) {
+                /* Wait for DISCONNECT event (may already be posted — always take) */
+                if (conn_done_sem) {
                     if (xSemaphoreTake(conn_done_sem,
                                        pdMS_TO_TICKS(5000)) != pdTRUE) {
                         ESP_LOGW(TAG, "Timed out waiting for disconnect");

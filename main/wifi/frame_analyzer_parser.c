@@ -96,44 +96,38 @@ eapol_key_packet_t *parse_eapol_key_packet(eapol_packet_t *eapol_packet){
 static pmkid_item_t *parse_pmkid_from_key_data(uint8_t *key_data, const uint16_t length){
     uint8_t *key_data_index = key_data;
     uint8_t *key_data_max_index = key_data + length;
-
     pmkid_item_t *pmkid_item_head = NULL;
-    key_data_field_t *key_data_field;
-    do{
-        key_data_field = (key_data_field_t *) key_data_index;
 
-        ESP_LOGV(TAG, "EAPOL-Key -> Key-Data -> type=%x; length=%x; oui=%x; data_type=%x",
-                    key_data_field->type, 
-                    key_data_field->length, 
-                    key_data_field->oui,
-                    key_data_field->data_type);
-        
-        if(key_data_field->type != KEY_DATA_TYPE){
-            ESP_LOGD(TAG, "Wrong type %x (expected %x)", key_data_field->type, KEY_DATA_TYPE);
-            continue;
+    while (key_data_index + 2 <= key_data_max_index) {
+        uint8_t type = key_data_index[0];
+        uint8_t field_len = key_data_index[1];
+        uint8_t *next = key_data_index + 2 + field_len;
+
+        if (next > key_data_max_index) {
+            ESP_LOGW(TAG, "Key-Data IE exceeds buffer (type=%x len=%u)", type, field_len);
+            break;
         }
 
-        if(ntohl(key_data_field->oui) != KEY_DATA_OUI_IEEE80211){
-            ESP_LOGD(TAG, "Wrong OUI %x (expected %x)", key_data_field->oui, KEY_DATA_OUI_IEEE80211);
-            continue;
+        /* Vendor-specific KDE: type 0xDD, length >= 4 (OUI+data_type) + 16 PMKID */
+        if (type == KEY_DATA_TYPE && field_len >= 20) {
+            /* OUI 00-0F-AC, data_type PMKID_KDE */
+            if (key_data_index[2] == 0x00 && key_data_index[3] == 0x0F &&
+                key_data_index[4] == 0xAC &&
+                key_data_index[5] == KEY_DATA_DATA_TYPE_PMKID_KDE) {
+                pmkid_item_t *pmkid_item = (pmkid_item_t *) malloc(sizeof(pmkid_item_t));
+                if (pmkid_item == NULL) {
+                    ESP_LOGE(TAG, "PMKID item alloc failed");
+                    break;
+                }
+                ESP_LOGI(TAG, "Found PMKID");
+                pmkid_item->next = pmkid_item_head;
+                pmkid_item_head = pmkid_item;
+                memcpy(pmkid_item->pmkid, &key_data_index[6], 16);
+            }
         }
 
-        if(key_data_field->data_type != KEY_DATA_DATA_TYPE_PMKID_KDE){
-            ESP_LOGD(TAG, "Wrong data type %x (expected %x)", key_data_field->data_type, KEY_DATA_DATA_TYPE_PMKID_KDE);
-            continue;
-        }
-
-        ESP_LOGI(TAG, "Found PMKID: ");
-        pmkid_item_t *pmkid_item = (pmkid_item_t *) malloc(sizeof(pmkid_item_t));
-        pmkid_item->next = pmkid_item_head;
-        pmkid_item_head = pmkid_item;
-        for(unsigned i = 0; i < 16; i++){
-            pmkid_item->pmkid[i] = key_data_field->data[i];
-            printf("%02x", pmkid_item->pmkid[i]);
-        }
-        printf("\n");
-
-    } while((key_data_index = key_data_field->data + key_data_field->length - 4 + 1) < key_data_max_index); 
+        key_data_index = next;
+    }
 
     return pmkid_item_head;
 }

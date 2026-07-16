@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "main.c"
         "main/attack.c"
+        "utils/heap_psram.c"
         "utils/management_helper.c"
         "utils/wifi_pass_verifier.c"
         "webserver.c"
@@ -33,7 +34,26 @@ idf_component_register(
         "bt/ble_deauth.c"
         "bt/ble_takeover.c"
         "bt/ble_passkey.c"
-        "ota/ota_attack.c"
+        "ota/ota_common.c"
+        "ota/ota_mqtt_sniff.c"
+        "ota/ota_inject.c"
+        "ota/ota_fetch.c"
+        "ota/ota_poll_sniff.c"
+        "ota/ota_provision.c"
+        "ota/ota_github.c"
+        "ota/ota_rogue_broker.c"
+        "ota/ota_fw_analyze.c"
+        "mesh/mesh.c"
+        "mesh/node_scanner.c"
+        "mesh/node_spoof.c"
+        "mesh/mesh_packet_inject.c"
+        "mesh/mesh_mitm.c"
+        "mesh/mesh_dos.c"
+        "mesh/mesh_eavesdrop.c"
+        "mesh/mesh_replay.c"
+        "mesh/mesh_wormhole.c"
+        "mesh/mesh_l2_deauth.c"
+        "mesh/mesh_route_poison.c"
 
     INCLUDE_DIRS
         "."
@@ -42,6 +62,7 @@ idf_component_register(
         "wifi"
         "bt"
         "ota"
+        "mesh"
 
 
     REQUIRES
@@ -55,5 +76,7 @@ idf_component_register(
         spiffs
         esp_http_client
         mqtt
+        lwip
+        wpa_supplicant
 
 )

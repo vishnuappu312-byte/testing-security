@@ -19,11 +19,13 @@
 
 #include "wifi_controller.h"
 #include "frame_analyzer_parser.h"
+#include "sniffer.h"
 
 static const char *TAG = "frame_analyzer";
 static uint8_t target_bssid[6];
 static search_type_t search_type = -1;
 static bool data_handler_registered = false;
+static bool mgmt_handler_registered = false;
 
 static void free_pmkid_items(pmkid_item_t *pmkid_item) {
     while (pmkid_item != NULL) {
@@ -50,38 +52,6 @@ static void data_frame_handler(void *args, esp_event_base_t event_base, int32_t 
         ESP_LOGV(TAG, "Not matching BSSIDs.");
         return;
     }
-
-    wifi_promiscuous_pkt_t *pkt = (wifi_promiscuous_pkt_t *) event_data;
-    uint8_t *payload = pkt->payload;
-
-    // Frame control field (first byte)
-    uint8_t frame_type = payload[0] & 0x0C;
-    uint8_t frame_subtype = payload[0] & 0xF0;
-
-
-    if (search_type == SEARCH_PROBE &&
-        frame_type == 0x00 &&      // Management
-        frame_subtype == 0x40) {   // Probe Request (0x04 << 4)
-
-            uint8_t ssid_len = payload[25];  // SSID length
-            uint8_t *ssid = &payload[26];
-
-            if (ssid_len > 0 && ssid_len <= 32) {
-                ESP_LOGI(TAG, "Probe SSID: %.*s", ssid_len, ssid);
-
-                ESP_ERROR_CHECK_WITHOUT_ABORT(
-                    esp_event_post(
-                        FRAME_ANALYZER_EVENTS,
-                        DATA_FRAME_EVENT_PROBE,
-                        ssid,
-                        ssid_len,
-                        portMAX_DELAY
-                    )
-                );
-            }
-
-            return;
-        }
 
     eapol_packet_t *eapol_packet = parse_eapol_packet((data_frame_t *) frame->payload);
     if(eapol_packet == NULL){
@@ -114,10 +84,59 @@ static void data_frame_handler(void *args, esp_event_base_t event_base, int32_t 
     }
 }
 
+/**
+ * Probe requests are management frames — handle them on MGMT sniffer events.
+ */
+static void mgmt_frame_handler(void *args, esp_event_base_t event_base, int32_t event_id, void *event_data) {
+    if (search_type != SEARCH_PROBE) {
+        return;
+    }
+
+    wifi_promiscuous_pkt_t *pkt = (wifi_promiscuous_pkt_t *) event_data;
+    if (pkt->rx_ctrl.sig_len < 26) {
+        return;
+    }
+
+    uint8_t *payload = pkt->payload;
+    uint8_t frame_type = payload[0] & 0x0C;
+    uint8_t frame_subtype = payload[0] & 0xF0;
+
+    if (frame_type != 0x00 || frame_subtype != 0x40) {
+        return;
+    }
+
+    /* Fixed mgmt header is 24 bytes; tagged params start at 24.
+     * Probe Request has no fixed params beyond header — SSID is first tag. */
+    if (pkt->rx_ctrl.sig_len < 26) return;
+    uint8_t ssid_len = payload[25];
+    if (ssid_len == 0 || ssid_len > 32) return;
+    if (26 + ssid_len > pkt->rx_ctrl.sig_len) return;
+    if (payload[24] != 0x00) return; /* SSID tag */
+
+    uint8_t *ssid = &payload[26];
+    ESP_LOGI(TAG, "Probe SSID: %.*s", ssid_len, ssid);
+    ESP_ERROR_CHECK_WITHOUT_ABORT(
+        esp_event_post(FRAME_ANALYZER_EVENTS, DATA_FRAME_EVENT_PROBE,
+                       ssid, ssid_len, portMAX_DELAY));
+}
+
 void frame_analyzer_capture_start(search_type_t search_type_arg, const uint8_t *bssid){
     ESP_LOGI(TAG, "Frame analysis started...");
     search_type = search_type_arg;
     memcpy(&target_bssid, bssid, 6);
+
+    if (search_type_arg == SEARCH_PROBE) {
+        if (!mgmt_handler_registered) {
+            esp_err_t err = esp_event_handler_register(SNIFFER_EVENTS, SNIFFER_EVENT_CAPTURED_MGMT,
+                                                       &mgmt_frame_handler, NULL);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "MGMT handler register failed: %s", esp_err_to_name(err));
+            } else {
+                mgmt_handler_registered = true;
+            }
+        }
+        return;
+    }
 
     if (data_handler_registered) {
         return;
@@ -133,15 +152,21 @@ void frame_analyzer_capture_start(search_type_t search_type_arg, const uint8_t *
 }
 
 void frame_analyzer_capture_stop(){
-    if (!data_handler_registered) {
-        return;
+    if (data_handler_registered) {
+        esp_err_t err = esp_event_handler_unregister(SNIFFER_EVENTS, SNIFFER_EVENT_CAPTURED_DATA, &data_frame_handler);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Frame analyzer DATA handler unregister failed: %s", esp_err_to_name(err));
+        } else {
+            data_handler_registered = false;
+        }
     }
 
-    esp_err_t err = esp_event_handler_unregister(SNIFFER_EVENTS, SNIFFER_EVENT_CAPTURED_DATA, &data_frame_handler);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Frame analyzer handler unregister failed: %s", esp_err_to_name(err));
-        return;
+    if (mgmt_handler_registered) {
+        esp_err_t err = esp_event_handler_unregister(SNIFFER_EVENTS, SNIFFER_EVENT_CAPTURED_MGMT, &mgmt_frame_handler);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Frame analyzer MGMT handler unregister failed: %s", esp_err_to_name(err));
+        } else {
+            mgmt_handler_registered = false;
+        }
     }
-
-    data_handler_registered = false;
 }

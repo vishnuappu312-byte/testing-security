@@ -76,10 +76,6 @@ static void nimble_host_task(void *param) {
 bool ble_common_init(void) {
     if (nimble_initialized) {
         ESP_LOGI(TAG, "NimBLE already initialized");
-        /* Try to take sync sem (may already be given from earlier init) */
-        if (sync_sem != NULL) {
-            xSemaphoreTake(sync_sem, pdMS_TO_TICKS(500));
-        }
         return true;
     }
 
@@ -107,15 +103,15 @@ bool ble_common_init(void) {
     ble_store_config_init();
 
     nimble_port_freertos_init(nimble_host_task);
-    nimble_initialized = true;
 
-    /* Wait for sync */
+    /* Wait for sync before marking initialized */
     vTaskDelay(pdMS_TO_TICKS(200));
     if (xSemaphoreTake(sync_sem, pdMS_TO_TICKS(5000)) != pdTRUE) {
         ESP_LOGE(TAG, "NimBLE sync timeout!");
         return false;
     }
 
+    nimble_initialized = true;
     ESP_LOGI(TAG, "NimBLE initialized and synced");
     return true;
 }
@@ -130,10 +126,10 @@ void ble_common_disconnect_all(void) {
     int rc;
     int count = 0;
 
-    for (uint16_t conn_handle = 0; conn_handle < 4; conn_handle++) {
+    /* Walk a generous handle range; NimBLE conn handles are small integers. */
+    for (uint16_t conn_handle = 0; conn_handle < 16; conn_handle++) {
         rc = ble_gap_conn_find(conn_handle, NULL);
         if (rc == 0) {
-            /* Connection exists — terminate it */
             rc = ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
             if (rc == 0) {
                 ESP_LOGI(TAG, "Terminated conn_handle=%u", conn_handle);

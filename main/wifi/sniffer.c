@@ -90,4 +90,5 @@ void wifictl_sniffer_start(uint8_t channel) {
 void wifictl_sniffer_stop() {
     ESP_LOGI(TAG, "Stopping promiscuous mode...");
     esp_wifi_set_promiscuous(false);
+    esp_wifi_set_promiscuous_rx_cb(NULL);
 }

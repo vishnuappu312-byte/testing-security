@@ -28,6 +28,8 @@ static bool is_running = false;
 static bool event_handler_registered = false;
 static SemaphoreHandle_t pmkid_mutex = NULL;
 static esp_timer_handle_t timeout_timer = NULL;
+static esp_timer_handle_t timeout_orphan = NULL;
+static bool pmkid_in_timeout_cb = false;
 static bool timeout_triggered = false;
 
 // --- Captured result storage for webserver ---
@@ -69,7 +71,9 @@ static void pmkid_timeout_cb(void *arg) {
     timeout_triggered = true;
     unlock();
     attack_update_status(FINISHED);
+    pmkid_in_timeout_cb = true;
     attack_pmkid_stop();
+    pmkid_in_timeout_cb = false;
 }
 
 /* ── Build hashcat-compatible hash string (16800 format) ── */
@@ -277,6 +281,15 @@ void attack_pmkid_start(attack_config_t *attack_config) {
     wifictl_sta_connect_to_ap(ap_record, "dummypassword");
 
     /* ── Start timeout timer (30 seconds) ── */
+    if (timeout_orphan) {
+        esp_timer_delete(timeout_orphan);
+        timeout_orphan = NULL;
+    }
+    if (timeout_timer != NULL) {
+        esp_timer_stop(timeout_timer);
+        esp_timer_delete(timeout_timer);
+        timeout_timer = NULL;
+    }
     const esp_timer_create_args_t timer_args = {
         .callback = pmkid_timeout_cb,
         .name = "pmkid_timeout"
@@ -318,8 +331,17 @@ void attack_pmkid_stop(void) {
     // Stop and delete timeout timer
     if (timeout_timer != NULL) {
         esp_timer_stop(timeout_timer);
-        esp_timer_delete(timeout_timer);
-        timeout_timer = NULL;
+        if (pmkid_in_timeout_cb) {
+            timeout_orphan = timeout_timer;
+            timeout_timer = NULL;
+        } else {
+            esp_timer_delete(timeout_timer);
+            timeout_timer = NULL;
+        }
+    }
+    if (!pmkid_in_timeout_cb && timeout_orphan) {
+        esp_timer_delete(timeout_orphan);
+        timeout_orphan = NULL;
     }
 
     lock();

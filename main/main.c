@@ -7,6 +7,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "heap_psram.h"
 #include "webserver.h"
 #include "wifi_scanner.h"
 #include "wifi_controller.h"
@@ -28,7 +29,25 @@
 #include "bt/ble_deauth.h"
 #include "bt/ble_passkey.h"
 #include "bt/ble_takeover.h"
-#include "ota_attack.h"
+#include "mesh.h"
+#include "node_scanner.h"
+#include "mesh_packet_inject.h"
+#include "mesh_mitm.h"
+#include "mesh_dos.h"
+#include "mesh_eavesdrop.h"
+#include "mesh_replay.h"
+#include "mesh_wormhole.h"
+#include "mesh_l2_deauth.h"
+#include "mesh_route_poison.h"
+#include "ota_common.h"
+#include "ota_mqtt_sniff.h"
+#include "ota_inject.h"
+#include "ota_fetch.h"
+#include "ota_poll_sniff.h"
+#include "ota_provision.h"
+#include "ota_github.h"
+#include "ota_rogue_broker.h"
+#include "ota_fw_analyze.h"
 
 static const char *TAG = "MAIN";
 
@@ -40,6 +59,8 @@ void app_main(void) {
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+
+    heap_psram_init();
 
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
@@ -71,8 +92,28 @@ void app_main(void) {
     ble_passkey_init();
     ble_takeover_init();
 
-    /* ---- OTA: Attack module ---- */
-    ota_attack_init();
+    /* ---- OTA: Attack modules ---- */
+    ota_common_init();
+    ota_mqtt_sniff_init();
+    ota_inject_init();
+    ota_fetch_init();
+    ota_poll_sniff_init();
+    ota_provision_init();
+    ota_github_init();
+    ota_rogue_broker_init();
+    ota_fw_analyze_init();
+
+    /* ---- Mesh: Node scanner + mesh attacks ---- */
+    node_scanner_init();
+    mesh_init();
+    mesh_packet_inject_init();
+    mesh_mitm_init();
+    mesh_dos_init();
+    mesh_eavesdrop_init();
+    mesh_replay_init();
+    mesh_wormhole_init();
+    mesh_l2_deauth_init();
+    mesh_route_poison_init();
 
     /* ---- Web server (serves dashboard + all API endpoints) ---- */
     start_web_server();
@@ -101,12 +142,25 @@ void app_main(void) {
     ESP_LOGI(TAG, "  BLE Passkey Capture");
     ESP_LOGI(TAG, "  BLE Takeover");
     ESP_LOGI(TAG, "OTA Attacks:");
-    ESP_LOGI(TAG, "  MQTT OTA Intercept (5 modes)");
-    ESP_LOGI(TAG, "  - SNIFF: Passive MQTT capture");
-    ESP_LOGI(TAG, "  - CLIENT: MQTT broker subscriber");
-    ESP_LOGI(TAG, "  - INJECT: Spoof OTA messages");
-    ESP_LOGI(TAG, "  - FETCH: Download firmware");
-    ESP_LOGI(TAG, "  - POLL_SNIFF: DNS/HTTP OTA sniff");
+    ESP_LOGI(TAG, "  MQTT Sniff (passive + client subscribe)");
+    ESP_LOGI(TAG, "  Inject (spoof OTA MQTT messages)");
+    ESP_LOGI(TAG, "  Fetch (download firmware over HTTP)");
+    ESP_LOGI(TAG, "  Poll Sniff (DNS/HTTP OTA discovery)");
+    ESP_LOGI(TAG, "  Provision (credential capture)");
+    ESP_LOGI(TAG, "  GitHub (repo access / firmware upload)");
+    ESP_LOGI(TAG, "  Rogue Broker (MQTT republish / MITM)");
+    ESP_LOGI(TAG, "  Firmware Analyze (secret scan)");
+    ESP_LOGI(TAG, "Mesh:");
+    ESP_LOGI(TAG, "  Node Scanner (nearby AP + soft-AP subnet)");
+    ESP_LOGI(TAG, "  Node Spoof (MAC clone + traffic capture)");
+    ESP_LOGI(TAG, "  Packet Injection (802.11 frame TX, 8 templates)");
+    ESP_LOGI(TAG, "  Man-in-the-Middle (ARP poison + traffic capture)");
+    ESP_LOGI(TAG, "  DoS (Child/Parent Deauth, Mesh Action, Auth/Probe/Beacon)");
+    ESP_LOGI(TAG, "  Eavesdrop (promiscuous mesh capture)");
+    ESP_LOGI(TAG, "  Replay (live / cycle frame replay)");
+    ESP_LOGI(TAG, "  Wormhole (capture + tunnel/re-TX)");
+    ESP_LOGI(TAG, "  L2 Deauth (mesh link teardown)");
+    ESP_LOGI(TAG, "  Route Poison (mesh path disruption)");
     ESP_LOGI(TAG, "=========================================");
     ESP_LOGI(TAG, "Connect to WiFi AP: %s", ssid);
     ESP_LOGI(TAG, "Open browser: http://192.168.4.1");

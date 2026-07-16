@@ -130,14 +130,14 @@ static void promiscuous_rx_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
 
     if (is_zero_mac(hdr->addr3)) return;
 
-    /* Check: is this a deauth frame? (Type=0 Mgmt, Subtype=0xC Deauth) */
+    /* Check: deauth (0xC0) or disassoc (0xA0) management subtype */
     uint8_t frame_type    = hdr->frame_ctrl[0] & 0x0C;
     uint8_t frame_subtype = hdr->frame_ctrl[0] & 0xF0;
 
-    if (frame_type != 0x00 || frame_subtype != 0xC0) return;
+    if (frame_type != 0x00) return;
+    if (frame_subtype != 0xC0 && frame_subtype != 0xA0) return;
 
-    /* Also detect disassociation frames (subtype 0xA0) */
-    bool is_disassoc = (frame_type == 0x00 && frame_subtype == 0xA0);
+    bool is_disassoc = (frame_subtype == 0xA0);
 
     int64_t now_ms = esp_timer_get_time() / 1000;
 

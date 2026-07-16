@@ -169,7 +169,8 @@ static void set_random_mac(void)
 {
     uint8_t rnd_addr[6];
     esp_fill_random(rnd_addr, sizeof(rnd_addr));
-    rnd_addr[0] |= 0xC0;   /* Random static address: two LSBs = 11 */
+    /* NimBLE stores MSB in val[5]; random static requires top two bits = 11 */
+    rnd_addr[5] = (rnd_addr[5] & 0x3F) | 0xC0;
     int rc = ble_hs_id_set_rnd(rnd_addr);
     if (rc != 0) {
         ESP_LOGD(TAG, "ble_hs_id_set_rnd failed: %d", rc);
@@ -393,7 +394,9 @@ static void run_phase1_connect(void)
 
     xSemaphoreTake(conn_done_sem, 0);
 
-    uint8_t own_addr_type = ble_common_own_addr_type();
+    uint8_t own_addr_type = cfg.rotate_own_mac
+                                ? BLE_OWN_ADDR_RANDOM
+                                : ble_common_own_addr_type();
 
     int rc = ble_gap_connect(own_addr_type, &peer,
                              cfg.connect_timeout_ms,
@@ -673,16 +676,17 @@ void ble_deauth_init(void)
 {
     ble_common_init();
 
-    mutex         = xSemaphoreCreateMutex();
-    conn_done_sem = xSemaphoreCreateBinary();
-    task_exit_sem = xSemaphoreCreateBinary();
+    if (mutex == NULL)         mutex = xSemaphoreCreateMutex();
+    if (conn_done_sem == NULL) conn_done_sem = xSemaphoreCreateBinary();
+    if (task_exit_sem == NULL) task_exit_sem = xSemaphoreCreateBinary();
 
-    /* Create one-shot timeout timer */
-    esp_timer_create_args_t timer_args = {
-        .callback = timeout_cb,
-        .name     = "ble_deauth_timeout",
-    };
-    esp_timer_create(&timer_args, &timeout_timer);
+    if (timeout_timer == NULL) {
+        esp_timer_create_args_t timer_args = {
+            .callback = timeout_cb,
+            .name     = "ble_deauth_timeout",
+        };
+        esp_timer_create(&timer_args, &timeout_timer);
+    }
 
     ESP_LOGI(TAG, "ble_deauth initialized (3-phase: direct + WiFi jam + spoof)");
 }

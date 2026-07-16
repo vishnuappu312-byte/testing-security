@@ -381,9 +381,14 @@ static void dns_server_task(void *arg) {
         int qidx = 12;
         for (uint16_t q = 0; q < qdcount && qidx < rx_len; q++) {
             while (qidx < rx_len && tx_buf[qidx] != 0) {
-                qidx++;
+                qidx += 1 + (uint8_t)tx_buf[qidx]; /* length-prefixed label */
+                if (qidx >= rx_len) break;
             }
             qidx += 5;  /* null label + QTYPE(2) + QCLASS(2) */
+        }
+
+        if (qidx > rx_len || qidx + 16 > (int)sizeof(tx_buf)) {
+            continue; /* malformed / would overflow answer */
         }
 
         tx_len = qidx;

@@ -1,5 +1,6 @@
 #include "attack_beacon_spam.h"
 #include "wsl_bypasser.h"
+#include "heap_psram.h"
 
 #include <stdbool.h>
 #include <string.h>
@@ -65,7 +66,7 @@ typedef struct {
  *  Shared state  (all access MUST go through mutex)
  * ═══════════════════════════════════════════════ */
 static SemaphoreHandle_t       beacon_mutex       = NULL;
-static spam_ap_t               spam_pool[BEACON_SPAM_MAX_APS];
+static spam_ap_t              *spam_pool          = NULL;
 static uint16_t                active_spam_count  = 0;
 static bool                    is_running         = false;
 static beacon_spam_mode_t      cur_mode           = BEACON_MODE_COMMON;
@@ -77,6 +78,8 @@ static int64_t                 start_time_us      = 0;
  * read-only in timer callback after started) */
 static esp_timer_handle_t      beacon_timer_handle = NULL;
 static esp_timer_handle_t      timeout_timer       = NULL;
+static esp_timer_handle_t      timeout_orphan      = NULL;
+static bool                    beacon_in_timeout_cb = false;
 
 /* ═══════════════════════════════════════════════
  *  Mutex helpers  (lazy-init, same pattern as PMKID/DoS)
@@ -162,7 +165,7 @@ static void generate_random_mac(uint8_t mac[6]) {
  * ═══════════════════════════════════════════════ */
 static void timer_send_beacon(void *arg) {
     /* Quick running check without mutex (atomic read) */
-    if (!is_running) return;
+    if (!is_running || spam_pool == NULL) return;
 
     uint8_t chan = 1;
     wifi_second_chan_t sec;
@@ -192,10 +195,16 @@ static void beacon_timeout_cb(void *arg) {
         timeout_occurred = true;
         beacon_mutex_give();
     }
+    beacon_in_timeout_cb = true;
     attack_beacon_spam_stop();
+    beacon_in_timeout_cb = false;
 }
 
 static void beacon_timeout_start(void) {
+    if (timeout_orphan != NULL) {
+        esp_timer_delete(timeout_orphan);
+        timeout_orphan = NULL;
+    }
     if (timeout_timer != NULL) {
         esp_timer_stop(timeout_timer);
         esp_timer_delete(timeout_timer);
@@ -212,8 +221,17 @@ static void beacon_timeout_start(void) {
 static void beacon_timeout_stop(void) {
     if (timeout_timer != NULL) {
         esp_timer_stop(timeout_timer);
-        esp_timer_delete(timeout_timer);
-        timeout_timer = NULL;
+        if (beacon_in_timeout_cb) {
+            timeout_orphan = timeout_timer;
+            timeout_timer = NULL;
+        } else {
+            esp_timer_delete(timeout_timer);
+            timeout_timer = NULL;
+        }
+    }
+    if (!beacon_in_timeout_cb && timeout_orphan != NULL) {
+        esp_timer_delete(timeout_orphan);
+        timeout_orphan = NULL;
     }
 }
 
@@ -246,6 +264,15 @@ void attack_beacon_spam_start(uint8_t count, beacon_spam_mode_t mode) {
     cur_mode         = mode;
     active_spam_count = (count > 0 && count <= BEACON_SPAM_MAX_APS) ? count : 20;
     start_time_us    = esp_timer_get_time();
+
+    if (spam_pool == NULL) {
+        spam_pool = heap_psram_calloc(BEACON_SPAM_MAX_APS, sizeof(spam_ap_t));
+        if (spam_pool == NULL) {
+            ESP_LOGE(TAG, "Beacon spam pool alloc failed");
+            beacon_mutex_give();
+            return;
+        }
+    }
 
     /* Generate spam pool */
     for (int i = 0; i < active_spam_count; i++) {
