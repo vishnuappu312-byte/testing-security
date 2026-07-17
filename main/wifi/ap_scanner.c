@@ -50,8 +50,12 @@ void wifictl_scan_nearby_aps(){
         .channel = 0,
         .show_hidden = true,
         .scan_type = WIFI_SCAN_TYPE_ACTIVE,
+        /* Leave active scan time at 0 (driver default). Custom active dwell
+         * times are rejected by the Wi-Fi/BT coexistence scheduler when
+         * Bluetooth is enabled, which logs a spurious "should use default
+         * active scan time" warning. */
         .scan_time = {
-            .active = { .min = 100, .max = 300 },
+            .active = { .min = 0, .max = 0 },
         },
     };
 

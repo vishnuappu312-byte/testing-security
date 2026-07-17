@@ -20,6 +20,11 @@
 #include "attack_pmkid.h"
 #include "attack_probe.h"
 #include "attack_eviltwin.h"
+#include "attack_karma.h"
+#include "attack_csa.h"
+#include "attack_pmf.h"
+#include "attack_wps.h"
+#include "attack_eap_audit.h"
 #include "attack_bt_spam.h"
 #include "bt/ble_scan.h"
 #include "bt/ble_spoof.h"
@@ -61,6 +66,8 @@ static wifi_ap_record_t dos_target = {0};
 static wifi_ap_record_t handshake_target = {0};
 static wifi_ap_record_t pmkid_target = {0};
 static wifi_ap_record_t evil_twin_target = {0};
+static wifi_ap_record_t csa_target = {0};
+static wifi_ap_record_t eap_audit_target = {0};
 
 ESP_EVENT_DEFINE_BASE(WEBSERVER_EVENTS);
 
@@ -2594,6 +2601,345 @@ static esp_err_t eviltwin_start_handler(httpd_req_t *req) {
     return send_success_response(req);
 }
 
+/* ── Karma / CSA / PMF / WPS / EAP Audit Handlers ── */
+
+static esp_err_t karma_start_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    char content[256] = {0};
+    int ret = httpd_req_recv(req, content, sizeof(content) - 1);
+    bool send_beacons = true;
+    bool respond_broadcast = false;
+    uint16_t timeout_sec = KARMA_TIMEOUT_SEC;
+    if (ret > 0) {
+        content[ret] = '\0';
+        cJSON *root = cJSON_Parse(content);
+        if (root) {
+            cJSON *jb = cJSON_GetObjectItem(root, "send_beacons");
+            cJSON *jrb = cJSON_GetObjectItem(root, "respond_broadcast");
+            cJSON *jt = cJSON_GetObjectItem(root, "timeout_sec");
+            if (cJSON_IsBool(jb)) send_beacons = jb->valueint;
+            if (cJSON_IsBool(jrb)) respond_broadcast = jrb->valueint;
+            if (cJSON_IsNumber(jt)) timeout_sec = (uint16_t)jt->valueint;
+            cJSON_Delete(root);
+        }
+    }
+    esp_err_t err = attack_karma_start(respond_broadcast, send_beacons, timeout_sec);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Radio busy or already running");
+        return ESP_FAIL;
+    }
+    return send_success_response(req);
+}
+
+static esp_err_t karma_stop_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    attack_karma_stop();
+    return send_success_response(req);
+}
+
+static esp_err_t karma_status_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    return send_json_response(req, attack_karma_get_status_json());
+}
+
+static esp_err_t karma_results_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    return send_json_response(req, attack_karma_get_results_json());
+}
+
+static esp_err_t karma_clear_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    attack_karma_clear();
+    return send_success_response(req);
+}
+
+static bool parse_mac_field(cJSON *root, const char *key, uint8_t out[6], bool optional)
+{
+    cJSON *j = cJSON_GetObjectItem(root, key);
+    if (!cJSON_IsString(j) || j->valuestring == NULL) {
+        if (optional) {
+            memset(out, 0xFF, 6);
+            return true;
+        }
+        return false;
+    }
+    return parse_bssid(j->valuestring, out);
+}
+
+static esp_err_t csa_start_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    char content[400] = {0};
+    int ret = httpd_req_recv(req, content, sizeof(content) - 1);
+    if (ret <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing body");
+        return ESP_FAIL;
+    }
+    content[ret] = '\0';
+    cJSON *root = cJSON_Parse(content);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+    if (!fill_ap_record_from_json(root, &csa_target, true)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing or invalid target");
+        return ESP_FAIL;
+    }
+    attack_csa_config_t cfg = {0};
+    cfg.target = csa_target;
+    cJSON *jn = cJSON_GetObjectItem(root, "new_channel");
+    cJSON *jc = cJSON_GetObjectItem(root, "count");
+    cJSON *jm = cJSON_GetObjectItem(root, "mode");
+    cJSON *ja = cJSON_GetObjectItem(root, "use_action");
+    cJSON *jb = cJSON_GetObjectItem(root, "use_beacon");
+    cJSON *ji = cJSON_GetObjectItem(root, "interval_ms");
+    cJSON *jt = cJSON_GetObjectItem(root, "timeout_sec");
+    cfg.new_channel = cJSON_IsNumber(jn) ? (uint8_t)jn->valueint : 1;
+    cfg.count = cJSON_IsNumber(jc) ? (uint8_t)jc->valueint : 1;
+    cfg.mode = cJSON_IsNumber(jm) ? (uint8_t)jm->valueint : 0;
+    cfg.use_action = cJSON_IsBool(ja) ? ja->valueint : true;
+    cfg.use_beacon = cJSON_IsBool(jb) ? jb->valueint : true;
+    cfg.interval_ms = cJSON_IsNumber(ji) ? (uint16_t)ji->valueint : 50;
+    cfg.timeout_sec = cJSON_IsNumber(jt) ? (uint16_t)jt->valueint : CSA_TIMEOUT_SEC;
+    if (!parse_mac_field(root, "dest", cfg.dest_mac, true)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid dest MAC");
+        return ESP_FAIL;
+    }
+    cJSON_Delete(root);
+
+    esp_err_t err = attack_csa_start(&cfg);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "CSA start failed");
+        return ESP_FAIL;
+    }
+    return send_success_response(req);
+}
+
+static esp_err_t csa_stop_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    attack_csa_stop();
+    return send_success_response(req);
+}
+
+static esp_err_t csa_status_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    return send_json_response(req, attack_csa_get_status_json());
+}
+
+static esp_err_t pmf_start_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    uint8_t channel = 0;
+    uint16_t timeout_sec = PMF_TIMEOUT_SEC;
+    char content[200] = {0};
+    int ret = httpd_req_recv(req, content, sizeof(content) - 1);
+    if (ret > 0) {
+        content[ret] = '\0';
+        cJSON *root = cJSON_Parse(content);
+        if (root) {
+            cJSON *jc = cJSON_GetObjectItem(root, "channel");
+            cJSON *jt = cJSON_GetObjectItem(root, "timeout_sec");
+            if (cJSON_IsNumber(jc)) channel = (uint8_t)jc->valueint;
+            if (cJSON_IsNumber(jt)) timeout_sec = (uint16_t)jt->valueint;
+            cJSON_Delete(root);
+        }
+    }
+    esp_err_t err = attack_pmf_start(channel, timeout_sec);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "PMF audit start failed");
+        return ESP_FAIL;
+    }
+    return send_success_response(req);
+}
+
+static esp_err_t pmf_stop_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    attack_pmf_stop();
+    return send_success_response(req);
+}
+
+static esp_err_t pmf_status_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    return send_json_response(req, attack_pmf_get_status_json());
+}
+
+static esp_err_t pmf_results_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    return send_json_response(req, attack_pmf_get_results_json());
+}
+
+static esp_err_t pmf_clear_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    attack_pmf_clear();
+    return send_success_response(req);
+}
+
+static esp_err_t wps_start_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    uint8_t channel = 0;
+    uint16_t timeout_sec = WPS_TIMEOUT_SEC;
+    char content[200] = {0};
+    int ret = httpd_req_recv(req, content, sizeof(content) - 1);
+    if (ret > 0) {
+        content[ret] = '\0';
+        cJSON *root = cJSON_Parse(content);
+        if (root) {
+            cJSON *jc = cJSON_GetObjectItem(root, "channel");
+            cJSON *jt = cJSON_GetObjectItem(root, "timeout_sec");
+            if (cJSON_IsNumber(jc)) channel = (uint8_t)jc->valueint;
+            if (cJSON_IsNumber(jt)) timeout_sec = (uint16_t)jt->valueint;
+            cJSON_Delete(root);
+        }
+    }
+    esp_err_t err = attack_wps_start(channel, timeout_sec);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "WPS audit start failed");
+        return ESP_FAIL;
+    }
+    return send_success_response(req);
+}
+
+static esp_err_t wps_stop_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    attack_wps_stop();
+    return send_success_response(req);
+}
+
+static esp_err_t wps_status_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    return send_json_response(req, attack_wps_get_status_json());
+}
+
+static esp_err_t wps_results_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    return send_json_response(req, attack_wps_get_results_json());
+}
+
+static esp_err_t wps_clear_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    attack_wps_clear();
+    return send_success_response(req);
+}
+
+static esp_err_t eap_audit_start_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    char content[320] = {0};
+    int ret = httpd_req_recv(req, content, sizeof(content) - 1);
+    uint16_t timeout_sec = EAP_AUDIT_TIMEOUT_SEC;
+    bool has_target = false;
+    if (ret > 0) {
+        content[ret] = '\0';
+        cJSON *root = cJSON_Parse(content);
+        if (root) {
+            cJSON *jt = cJSON_GetObjectItem(root, "timeout_sec");
+            if (cJSON_IsNumber(jt)) timeout_sec = (uint16_t)jt->valueint;
+            if (cJSON_GetObjectItem(root, "bssid") && cJSON_GetObjectItem(root, "channel")) {
+                if (fill_ap_record_from_json(root, &eap_audit_target, false)) {
+                    has_target = true;
+                }
+            }
+            cJSON_Delete(root);
+        }
+    }
+    esp_err_t err = attack_eap_audit_start(has_target ? &eap_audit_target : NULL, timeout_sec);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "EAP audit start failed");
+        return ESP_FAIL;
+    }
+    return send_success_response(req);
+}
+
+static esp_err_t eap_audit_stop_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    attack_eap_audit_stop();
+    return send_success_response(req);
+}
+
+static esp_err_t eap_audit_status_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    return send_json_response(req, attack_eap_audit_get_status_json());
+}
+
+static esp_err_t eap_audit_results_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    return send_json_response(req, attack_eap_audit_get_results_json());
+}
+
+static esp_err_t eap_audit_clear_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    attack_eap_audit_clear();
+    return send_success_response(req);
+}
+
 static esp_err_t eviltwin_stop_handler(httpd_req_t *req) {
     if (!request_is_authenticated(req)) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
@@ -4131,6 +4477,11 @@ static esp_err_t status_api_handler(httpd_req_t *req) {
     cJSON_AddBoolToObject(response, "dos_running", attack_dos_is_running());
     cJSON_AddBoolToObject(response, "beacon_running", attack_beacon_spam_is_running());
     cJSON_AddBoolToObject(response, "deauth_detect_running", deauth_detector_is_running());
+    cJSON_AddBoolToObject(response, "karma_running", attack_karma_is_running());
+    cJSON_AddBoolToObject(response, "csa_running", attack_csa_is_running());
+    cJSON_AddBoolToObject(response, "pmf_running", attack_pmf_is_running());
+    cJSON_AddBoolToObject(response, "wps_running", attack_wps_is_running());
+    cJSON_AddBoolToObject(response, "eap_audit_running", attack_eap_audit_is_running());
     cJSON_AddBoolToObject(response, "mesh_inject_running", mesh_packet_inject_is_active());
     cJSON_AddBoolToObject(response, "mesh_mitm_running", mesh_mitm_is_active());
     cJSON_AddBoolToObject(response, "mesh_dos_running", mesh_dos_is_active());
@@ -4264,6 +4615,11 @@ static esp_err_t stop_all_handler(httpd_req_t *req) {
     attack_handshake_stop();
     attack_pmkid_stop();
     attack_probe_stop();
+    attack_karma_stop();
+    attack_csa_stop();
+    attack_pmf_stop();
+    attack_wps_stop();
+    attack_eap_audit_stop();
     attack_bt_spam_stop();
     attack_eviltwin_stop();
     ble_deauth_stop();
@@ -4306,7 +4662,7 @@ void start_web_server(void) {
     httpd_handle_t server = NULL;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.lru_purge_enable = true;
-    config.max_uri_handlers = 150;
+    config.max_uri_handlers = 180;
     config.max_open_sockets = 3;         /* Reduced from 4 to save ~2KB */
     config.recv_wait_timeout = 5;
     config.send_wait_timeout = 5;
@@ -4411,6 +4767,58 @@ void start_web_server(void) {
         httpd_register_uri_handler(server, &eviltwin_passwords);
         httpd_uri_t eviltwin_clear = { .uri = "/api/eviltwin/clear", .method = HTTP_POST, .handler = eviltwin_clear_handler };
         httpd_register_uri_handler(server, &eviltwin_clear);
+
+        /* Karma / CSA / PMF / WPS / EAP Audit */
+        httpd_uri_t karma_start = { .uri = "/api/karma/start", .method = HTTP_POST, .handler = karma_start_handler };
+        httpd_register_uri_handler(server, &karma_start);
+        httpd_uri_t karma_stop = { .uri = "/api/karma/stop", .method = HTTP_POST, .handler = karma_stop_handler };
+        httpd_register_uri_handler(server, &karma_stop);
+        httpd_uri_t karma_status = { .uri = "/api/karma/status", .method = HTTP_GET, .handler = karma_status_handler };
+        httpd_register_uri_handler(server, &karma_status);
+        httpd_uri_t karma_results = { .uri = "/api/karma/results", .method = HTTP_GET, .handler = karma_results_handler };
+        httpd_register_uri_handler(server, &karma_results);
+        httpd_uri_t karma_clear = { .uri = "/api/karma/clear", .method = HTTP_POST, .handler = karma_clear_handler };
+        httpd_register_uri_handler(server, &karma_clear);
+
+        httpd_uri_t csa_start = { .uri = "/api/csa/start", .method = HTTP_POST, .handler = csa_start_handler };
+        httpd_register_uri_handler(server, &csa_start);
+        httpd_uri_t csa_stop = { .uri = "/api/csa/stop", .method = HTTP_POST, .handler = csa_stop_handler };
+        httpd_register_uri_handler(server, &csa_stop);
+        httpd_uri_t csa_status = { .uri = "/api/csa/status", .method = HTTP_GET, .handler = csa_status_handler };
+        httpd_register_uri_handler(server, &csa_status);
+
+        httpd_uri_t pmf_start = { .uri = "/api/pmf/start", .method = HTTP_POST, .handler = pmf_start_handler };
+        httpd_register_uri_handler(server, &pmf_start);
+        httpd_uri_t pmf_stop = { .uri = "/api/pmf/stop", .method = HTTP_POST, .handler = pmf_stop_handler };
+        httpd_register_uri_handler(server, &pmf_stop);
+        httpd_uri_t pmf_status = { .uri = "/api/pmf/status", .method = HTTP_GET, .handler = pmf_status_handler };
+        httpd_register_uri_handler(server, &pmf_status);
+        httpd_uri_t pmf_results = { .uri = "/api/pmf/results", .method = HTTP_GET, .handler = pmf_results_handler };
+        httpd_register_uri_handler(server, &pmf_results);
+        httpd_uri_t pmf_clear = { .uri = "/api/pmf/clear", .method = HTTP_POST, .handler = pmf_clear_handler };
+        httpd_register_uri_handler(server, &pmf_clear);
+
+        httpd_uri_t wps_start = { .uri = "/api/wps/start", .method = HTTP_POST, .handler = wps_start_handler };
+        httpd_register_uri_handler(server, &wps_start);
+        httpd_uri_t wps_stop = { .uri = "/api/wps/stop", .method = HTTP_POST, .handler = wps_stop_handler };
+        httpd_register_uri_handler(server, &wps_stop);
+        httpd_uri_t wps_status = { .uri = "/api/wps/status", .method = HTTP_GET, .handler = wps_status_handler };
+        httpd_register_uri_handler(server, &wps_status);
+        httpd_uri_t wps_results = { .uri = "/api/wps/results", .method = HTTP_GET, .handler = wps_results_handler };
+        httpd_register_uri_handler(server, &wps_results);
+        httpd_uri_t wps_clear = { .uri = "/api/wps/clear", .method = HTTP_POST, .handler = wps_clear_handler };
+        httpd_register_uri_handler(server, &wps_clear);
+
+        httpd_uri_t eap_start = { .uri = "/api/eap-audit/start", .method = HTTP_POST, .handler = eap_audit_start_handler };
+        httpd_register_uri_handler(server, &eap_start);
+        httpd_uri_t eap_stop = { .uri = "/api/eap-audit/stop", .method = HTTP_POST, .handler = eap_audit_stop_handler };
+        httpd_register_uri_handler(server, &eap_stop);
+        httpd_uri_t eap_status = { .uri = "/api/eap-audit/status", .method = HTTP_GET, .handler = eap_audit_status_handler };
+        httpd_register_uri_handler(server, &eap_status);
+        httpd_uri_t eap_results = { .uri = "/api/eap-audit/results", .method = HTTP_GET, .handler = eap_audit_results_handler };
+        httpd_register_uri_handler(server, &eap_results);
+        httpd_uri_t eap_clear = { .uri = "/api/eap-audit/clear", .method = HTTP_POST, .handler = eap_audit_clear_handler };
+        httpd_register_uri_handler(server, &eap_clear);
 
         /* BLE API (shortened for space – same as before) */
         httpd_uri_t ble_scan_uri = { .uri = "/api/ble/scan", .method = HTTP_GET, .handler = ble_scan_api_handler };

@@ -19,6 +19,12 @@
 #include "attack_pmkid.h"
 #include "attack_probe.h"
 #include "attack_eviltwin.h"
+#include "attack_karma.h"
+#include "attack_csa.h"
+#include "attack_pmf.h"
+#include "attack_wps.h"
+#include "attack_eap_audit.h"
+#include "wifi_radio_claim.h"
 #include "attack.h"
 #include "bt/attack_bt_spam.h"
 #include "bt/ble_scan.h"
@@ -76,10 +82,17 @@ void app_main(void) {
     scanner_init();
 
     /* ---- WiFi: Attack modules ---- */
+    wifi_radio_claim_init();
     deauth_attack_init();
     deauth_detector_start();
     attack_init();
     attack_eviltwin_init();
+    attack_probe_init();
+    attack_karma_init();
+    attack_csa_init();
+    attack_pmf_init();
+    attack_wps_init();
+    attack_eap_audit_init();
 
     /* ---- BLE: Attack modules ---- */
     attack_bt_spam_init();
@@ -130,6 +143,11 @@ void app_main(void) {
     ESP_LOGI(TAG, "  PMKID Attack (WPA3)");
     ESP_LOGI(TAG, "  Probe Sniffer (Ghost AP)");
     ESP_LOGI(TAG, "  Evil Twin (Captive portal)");
+    ESP_LOGI(TAG, "  Karma/MANA Responder");
+    ESP_LOGI(TAG, "  CSA Injection");
+    ESP_LOGI(TAG, "  PMF / 802.11w Audit");
+    ESP_LOGI(TAG, "  WPS Discovery Audit");
+    ESP_LOGI(TAG, "  EAP Identity Audit");
     ESP_LOGI(TAG, "BLE Attacks:");
     ESP_LOGI(TAG, "  BLE Spam (NimBLE flood)");
     ESP_LOGI(TAG, "  BLE Scan (Discover devices)");

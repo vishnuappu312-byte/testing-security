@@ -107,8 +107,12 @@ esp_err_t mesh_scanner_scan(uint8_t channel, scan_result_t *result)
             .channel     = channel,
             .show_hidden = true,
             .scan_type   = WIFI_SCAN_TYPE_ACTIVE,
+            /* Active dwell left at 0 (driver default). Custom active scan
+             * times are rejected by the Wi-Fi/BT coexistence scheduler when
+             * Bluetooth is enabled, producing a "should use default active
+             * scan time" warning. Passive dwell is still honored. */
             .scan_time   = {
-                .active  = { .min = 120, .max = 300 },
+                .active  = { .min = 0, .max = 0 },
                 .passive = SCANNER_PASSIVE_DWELL
             }
         };

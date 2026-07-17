@@ -22,6 +22,7 @@
 #include "wsl_bypasser.h"
 #include "attack.h"
 #include "wifi_controller.h"
+#include "wifi_radio_claim.h"
 
 #define oled_log(line, row, fmt, ...) ESP_LOGI(TAG, fmt, ##__VA_ARGS__)
 #ifndef OLED_HEAD
@@ -288,6 +289,11 @@ void attack_probe_start(attack_config_t *attack_config) {
 
     ensure_mutex();
 
+    if (wifi_radio_claim(WIFI_RADIO_OWNER_PROBE) != ESP_OK) {
+        ESP_LOGW(TAG, "Cannot start probe: radio busy");
+        return;
+    }
+
     ESP_LOGI(TAG, "Starting Ghost Probe sniffer...");
 
     ghost_count = 0;
@@ -354,6 +360,8 @@ void attack_probe_stop(void) {
         vTaskDelete(hop_task_handle);
         hop_task_handle = NULL;
     }
+
+    wifi_radio_release(WIFI_RADIO_OWNER_PROBE);
 
     ESP_LOGI(TAG, "Stopped. Discovered %d ghost APs from %d probes",
              ghost_count, total_probes_seen);

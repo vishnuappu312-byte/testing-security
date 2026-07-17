@@ -332,7 +332,9 @@ static bool resolve_ap_bssid(void)
         .channel = ch,
         .show_hidden = true,
         .scan_type = WIFI_SCAN_TYPE_ACTIVE,
-        .scan_time = { .active = { .min = 100, .max = 300 } },
+        /* Active dwell left at 0 (driver default); custom values trigger a
+         * coexistence warning when Bluetooth is enabled. */
+        .scan_time = { .active = { .min = 0, .max = 0 } },
     };
 
     if (esp_wifi_scan_start(&sc, true) == ESP_OK) {

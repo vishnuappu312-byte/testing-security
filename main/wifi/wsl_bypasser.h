@@ -38,4 +38,39 @@ void wsl_bypasser_send_deauth_targeted(const uint8_t *ap_bssid, const uint8_t *c
 
 
 void wsl_bypasser_send_disassociation_frame(const uint8_t *ap_bssid, const uint8_t *client_mac);
+
+/**
+ * @brief Send a Probe Response for Karma/MANA style responses.
+ */
+bool wsl_bypasser_send_probe_response(const uint8_t *dest_mac,
+                                      const uint8_t *bssid,
+                                      const uint8_t *ssid,
+                                      uint8_t ssid_length,
+                                      uint8_t channel);
+
+/**
+ * @brief Send a Channel Switch Announcement action frame (spectrum mgmt).
+ *
+ * @param ap_bssid   Forged transmitter / BSSID
+ * @param dest_mac   Destination (broadcast or client)
+ * @param new_channel Target channel
+ * @param count       TBTTs until switch (0 = immediate)
+ * @param mode        CSA mode (0 = no restriction)
+ */
+bool wsl_bypasser_send_csa_action(const uint8_t *ap_bssid,
+                                  const uint8_t *dest_mac,
+                                  uint8_t new_channel,
+                                  uint8_t count,
+                                  uint8_t mode);
+
+/**
+ * @brief Send a Beacon containing a CSA IE (tag 0x25).
+ */
+bool wsl_bypasser_send_csa_beacon(const uint8_t *bssid,
+                                  const uint8_t *ssid,
+                                  uint8_t ssid_length,
+                                  uint8_t current_channel,
+                                  uint8_t new_channel,
+                                  uint8_t count,
+                                  uint8_t mode);
 #endif
