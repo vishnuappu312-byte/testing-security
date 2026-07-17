@@ -1,5 +1,5 @@
 /**
- * ota_provision.h - HTTP provision credential sniffer
+ * ota_provision.h - bounded HTTP provisioning capture
  */
 
 #ifndef OTA_PROVISION_H
@@ -9,22 +9,36 @@
 #include <stdint.h>
 #include "esp_err.h"
 #include "cJSON.h"
-#include "ota_common.h"
+
+#define OTA_PROV_MAX_PORTS 4
+#define OTA_PROV_MAX_FIELDS 8
+#define OTA_PROV_MAX_PREVIEW 24
+#define OTA_PROV_DEFAULT_PCAP_BYTES (256U * 1024U)
+#define OTA_PROV_MAX_PCAP_BYTES (1024U * 1024U)
 
 typedef struct {
-    char wifi_ssid[33];
-    char wifi_password[64];
-    uint16_t sniff_port;
-    bool capture_post_only;
-    bool auto_parse_json;
+    uint8_t channel;
+    uint16_t ports[OTA_PROV_MAX_PORTS];
+    uint8_t port_count;
+    uint32_t max_pcap_bytes;
     uint32_t timeout_sec;
 } ota_provision_config_t;
 
 typedef struct {
     bool active;
     bool timeout;
-    uint32_t cred_count;
-    uint32_t sensitive_count;
+    uint8_t channel;
+    uint16_t ports[OTA_PROV_MAX_PORTS];
+    uint8_t port_count;
+    uint32_t packets_seen;
+    uint32_t packets_matched;
+    uint32_t packets_captured;
+    uint32_t packets_dropped;
+    uint32_t malformed_packets;
+    uint32_t timeout_count;
+    uint32_t preview_count;
+    uint32_t pcap_bytes;
+    uint32_t pcap_capacity;
     uint32_t elapsed_sec;
     uint32_t remaining_sec;
     char state[32];
@@ -37,11 +51,9 @@ esp_err_t ota_provision_stop(void);
 bool ota_provision_is_active(void);
 const ota_provision_state_t *ota_provision_get_state(void);
 cJSON *ota_provision_get_status_json(void);
-const char *ota_provision_get_creds_json(void);
+const char *ota_provision_get_preview_json(void);
 const char *ota_provision_get_summary_json(void);
-void ota_provision_get_summary(ota_prov_summary_t *out);
-uint32_t ota_provision_get_cred_count(void);
-uint32_t ota_provision_get_sensitive_count(void);
-void ota_provision_clear_creds(void);
+esp_err_t ota_provision_get_pcap(const uint8_t **data, size_t *size);
+void ota_provision_clear(void);
 
 #endif /* OTA_PROVISION_H */

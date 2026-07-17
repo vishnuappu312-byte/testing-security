@@ -1,5 +1,7 @@
 # Omega Local Console (personal testing only)
 
+Related project docs: [README](../README.md) · [overview](../overview.md) · [known issues](../KNOWN_ISSUES.md) · [memory usage](../MEMORY.md)
+
 Sideload-only Android WebView wrapper for the ESP32 dashboard at `http://192.168.4.1`.
 Not for clients. Not for Play Store.
 

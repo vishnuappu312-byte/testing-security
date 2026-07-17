@@ -3,7 +3,7 @@
 Snapshot from the last local build of **testing-security** (ESP32-S3, 8 MB flash).  
 Rebuild after large code changes and re-check with `idf.py size` / boot logs for live heap.
 
-Related: [overview.md](overview.md) · [README.md](README.md) · [partitions.csv](partitions.csv) · [sdkconfig.defaults](sdkconfig.defaults)
+Related: [overview.md](overview.md) · [README.md](README.md) · [KNOWN_ISSUES.md](KNOWN_ISSUES.md) · [Android console](android-console/README.md) · [partitions.csv](partitions.csv) · [sdkconfig.defaults](sdkconfig.defaults)
 
 ---
 
@@ -89,8 +89,9 @@ Use that (or `heap_caps_get_free_size`) for **live** free DRAM / PSRAM.
 | BLE spam scan | Up to 50 scan entries |
 | BLE takeover | Services / chars / notif log + JSON buffers |
 | BLE GATT probe | Discovery tables |
+| ESP-NOW store | Up to 48 captured frames × ~256 B (+ payload) in PSRAM via `heap_psram_*` |
 
-If PSRAM is missing, allocators fall back to internal DRAM (higher risk of OOM under web + BLE + OTA).
+If PSRAM is missing, allocators fall back to internal DRAM (higher risk of OOM under web + BLE + OTA + ESP-NOW).
 
 ---
 

@@ -21,6 +21,7 @@ typedef enum {
     WIFI_RADIO_OWNER_PMF,
     WIFI_RADIO_OWNER_WPS,
     WIFI_RADIO_OWNER_EAP_AUDIT,
+    WIFI_RADIO_OWNER_ESPNOW,
     WIFI_RADIO_OWNER_OTHER
 } wifi_radio_owner_t;
 

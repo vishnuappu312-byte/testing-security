@@ -76,6 +76,13 @@ Shared helpers in `ota_common`; modes:
 | DoS | Child/parent deauth, mesh action, auth/probe/beacon |
 | Eavesdrop / replay / wormhole | Promiscuous capture, replay, tunnel/re-TX |
 | L2 deauth / route poison | Link teardown and path disruption |
+| ESP-NOW | Fixed-channel monitor, peer discovery, capture, replay, inject, rate-limited flood |
+
+### Documentation
+- **[overview.md](overview.md)** — architecture, modules, startup flow, and API map
+- **[MEMORY.md](MEMORY.md)** — flash, DRAM, IRAM, PSRAM, and storage usage
+- **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)** — fixed limitations and remaining work
+- **[android-console/README.md](android-console/README.md)** — Android console build and usage
 
 ### Memory
 - Large buffers (OTA JSON, AP scan table, beacon pool, BLE GATT/scan stores) prefer **PSRAM** via `heap_psram_*`
@@ -156,6 +163,9 @@ testing-security/
 ├── MEMORY.md
 ├── LICENSE
 ├── README.md
+├── overview.md
+├── android-console/
+│   └── README.md             # Android dashboard wrapper setup
 └── main/
     ├── main.c                 # app_main: NVS, AP, module inits, web server
     ├── webserver.c / web_ui.h # HTTP API + dashboard

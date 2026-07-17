@@ -29,6 +29,7 @@ const char *wifi_radio_owner_str(wifi_radio_owner_t owner)
         case WIFI_RADIO_OWNER_PMF:       return "pmf";
         case WIFI_RADIO_OWNER_WPS:       return "wps";
         case WIFI_RADIO_OWNER_EAP_AUDIT: return "eap_audit";
+        case WIFI_RADIO_OWNER_ESPNOW:    return "espnow";
         case WIFI_RADIO_OWNER_OTHER:     return "other";
         default:                         return "unknown";
     }

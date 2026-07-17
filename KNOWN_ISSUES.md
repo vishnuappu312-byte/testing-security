@@ -1,6 +1,8 @@
 # Known issues (local)
 
-Verified against current tree (2026-07-16). Status reflects whether the listed problem still applies after local fixes across **OTA**, **BLE**, and **WiFi**.
+Related: [README.md](README.md) · [overview.md](overview.md) · [MEMORY.md](MEMORY.md) · [Android console](android-console/README.md)
+
+Verified against current tree (2026-07-17). Status reflects whether the listed problem still applies after local fixes across **OTA**, **BLE**, **WiFi**, and **ESP-NOW**.
 
 ---
 
@@ -11,6 +13,7 @@ Verified against current tree (2026-07-16). Status reflects whether the listed p
 | OTA | 5 | 3 |
 | BLE | 12 | 2 |
 | WiFi | 15 | 4 |
+| ESP-NOW | 0 | 2 |
 
 ---
 
@@ -92,3 +95,7 @@ Verified against current tree (2026-07-16). Status reflects whether the listed p
 2. **Handshake completion criteria** — require a valid HCCAPX message pair, not raw EAPOL frame count.
 3. **Evil twin verify** — verify off-path (or after portal stop) so APSTA portal stays up.
 4. **Encrypted capture** — same design limit as OTA/BLE cleartext-only sniff.
+
+### ESP-NOW
+1. **Encrypted ESP-NOW payloads** — monitor/capture stores opaque bodies when peers use PMK encryption; no key recovery path.
+2. **Soft-AP disconnect during channel lock** — fixed-channel ESP-NOW pauses the management AP; dashboard clients must reconnect after stop.

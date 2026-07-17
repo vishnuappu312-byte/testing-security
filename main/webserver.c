@@ -59,6 +59,7 @@
 #include "mesh_wormhole.h"
 #include "mesh_l2_deauth.h"
 #include "mesh_route_poison.h"
+#include "espnow_attack.h"
 
 static const char *TAG = "WEB_SERVER";
 static httpd_handle_t server_handle = NULL;
@@ -2131,6 +2132,163 @@ static esp_err_t mesh_route_poison_stop_handler(httpd_req_t *req)
     return send_json_response(req, resp);
 }
 
+/* ================================================================== */
+/*  ESP-NOW ATTACK HANDLERS                                            */
+/* ================================================================== */
+
+static esp_err_t espnow_start_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    char buf[768] = {0};
+    size_t total = 0;
+    int remaining = req->content_len;
+    if (remaining <= 0 || remaining >= (int)sizeof(buf)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad/oversized body");
+        return ESP_FAIL;
+    }
+    while (remaining > 0) {
+        int len = httpd_req_recv(req, buf + total, remaining);
+        if (len <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
+            return ESP_FAIL;
+        }
+        total += (size_t)len;
+        remaining -= len;
+    }
+    buf[total] = '\0';
+
+    cJSON *root = cJSON_Parse(buf);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+
+    cJSON *jchan     = cJSON_GetObjectItem(root, "channel");
+    cJSON *jmode     = cJSON_GetObjectItem(root, "mode");
+    cJSON *jtarget   = cJSON_GetObjectItem(root, "target_mac");
+    if (!jtarget) jtarget = cJSON_GetObjectItem(root, "dest_mac");
+    cJSON *jbc       = cJSON_GetObjectItem(root, "broadcast");
+    cJSON *jframe    = cJSON_GetObjectItem(root, "frame_index");
+    cJSON *jpayload  = cJSON_GetObjectItem(root, "payload_hex");
+    cJSON *jburst    = cJSON_GetObjectItem(root, "burst_count");
+    if (!jburst) jburst = cJSON_GetObjectItem(root, "burst_size");
+    cJSON *jintv     = cJSON_GetObjectItem(root, "interval_ms");
+    cJSON *jtimeout  = cJSON_GetObjectItem(root, "timeout_sec");
+
+    espnow_attack_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.frame_index = -1;
+
+    if (!cJSON_IsNumber(jchan) || jchan->valueint < 1 || jchan->valueint > 13) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "channel required (1-13)");
+        return ESP_FAIL;
+    }
+    cfg.channel = (uint8_t)jchan->valueint;
+
+    cfg.mode = cJSON_IsNumber(jmode)
+        ? (espnow_attack_mode_t)jmode->valueint
+        : ESPNOW_MODE_MONITOR;
+    if (cfg.mode >= ESPNOW_MODE_COUNT) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid mode");
+        return ESP_FAIL;
+    }
+
+    if (cJSON_IsBool(jbc) && cJSON_IsTrue(jbc)) {
+        cfg.broadcast = true;
+    }
+    if (cJSON_IsString(jtarget) && parse_mac_arg(jtarget->valuestring, cfg.target_mac)) {
+        cfg.target_mac_set = true;
+    }
+    if (cJSON_IsNumber(jframe)) {
+        cfg.frame_index = (int16_t)jframe->valueint;
+    }
+    if (cJSON_IsNumber(jburst) && jburst->valueint > 0) {
+        cfg.burst_count = (uint16_t)jburst->valueint;
+    } else {
+        cfg.burst_count = 1;
+    }
+    if (cJSON_IsNumber(jintv) && jintv->valueint > 0) {
+        cfg.interval_ms = (uint16_t)jintv->valueint;
+    } else {
+        cfg.interval_ms = 50;
+    }
+    if (cJSON_IsNumber(jtimeout) && jtimeout->valueint > 0) {
+        cfg.timeout_sec = (uint16_t)jtimeout->valueint;
+    }
+
+    if (cJSON_IsString(jpayload) && jpayload->valuestring[0]) {
+        if (!espnow_attack_parse_hex_payload(jpayload->valuestring,
+                                             cfg.payload, &cfg.payload_len)) {
+            cJSON_Delete(root);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                "Invalid payload_hex (even hex, max 250 bytes)");
+            return ESP_FAIL;
+        }
+    }
+
+    if ((cfg.mode == ESPNOW_MODE_INJECT ||
+         (cfg.mode == ESPNOW_MODE_FLOOD && cfg.payload_len > 0)) &&
+        cfg.payload_len == 0) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "payload_hex required for inject/flood");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGW(TAG, "ESP-NOW: ch=%u mode=%d burst=%u interval=%u payload=%u",
+             cfg.channel, (int)cfg.mode, cfg.burst_count, cfg.interval_ms,
+             cfg.payload_len);
+
+    esp_err_t ret = espnow_attack_start(&cfg);
+    cJSON_Delete(root);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "success", ret == ESP_OK);
+    cJSON_AddStringToObject(resp, "status", esp_err_to_name(ret));
+    if (ret == ESP_ERR_INVALID_STATE) {
+        cJSON_AddStringToObject(resp, "error", "Radio busy or already running");
+    }
+    return send_json_response(req, resp);
+}
+
+static esp_err_t espnow_status_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    cJSON *status = espnow_attack_get_status_json();
+    if (!status) {
+        cJSON *fallback = cJSON_CreateObject();
+        cJSON_AddBoolToObject(fallback, "active", false);
+        cJSON_AddStringToObject(fallback, "status", "Idle");
+        cJSON_AddNumberToObject(fallback, "frames_captured", 0);
+        return send_json_response(req, fallback);
+    }
+    return send_json_response(req, status);
+}
+
+static esp_err_t espnow_stop_handler(httpd_req_t *req)
+{
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+
+    espnow_attack_stop();
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "success", true);
+    cJSON_AddStringToObject(resp, "status", "stopped");
+    return send_json_response(req, resp);
+}
+
 
 /* ================================================================== */
 /*  WiFi ATTACK HANDLERS                                               */
@@ -3113,6 +3271,15 @@ static esp_err_t ble_spoof_stop_handler(httpd_req_t *req) {
     return send_success_response(req);
 }
 
+static esp_err_t ble_spoof_status_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    cJSON *status = ble_spoof_get_status_json();
+    return send_json_response(req, status);
+}
+
 static esp_err_t ble_spoof_clone_handler(httpd_req_t *req) {
     if (!request_is_authenticated(req)) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
@@ -3248,6 +3415,15 @@ static esp_err_t ble_connect_stop_handler(httpd_req_t *req) {
     return send_success_response(req);
 }
 
+static esp_err_t ble_connect_status_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    cJSON *status = ble_connect_flood_get_status_json();
+    return send_json_response(req, status);
+}
+
 static esp_err_t ble_l2cap_start_handler(httpd_req_t *req) {
     if (!request_is_authenticated(req)) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
@@ -3309,6 +3485,15 @@ static esp_err_t ble_gatt_stop_handler(httpd_req_t *req) {
     }
     ble_gatt_probe_stop();
     return send_success_response(req);
+}
+
+static esp_err_t ble_gatt_status_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    cJSON *status = ble_gatt_probe_get_status_json();
+    return send_json_response(req, status);
 }
 
 static esp_err_t ble_deauth_start_handler(httpd_req_t *req) {
@@ -3581,7 +3766,7 @@ static void ota_stop_all(void)
 /*  OTA ATTACK HANDLERS                                                */
 /* ================================================================== */
 
-static esp_err_t ota_start_handler(httpd_req_t *req) {
+static esp_err_t ota_start_with_mode(httpd_req_t *req, int forced_mode) {
     if (!request_is_authenticated(req)) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
         return ESP_FAIL;
@@ -3598,13 +3783,16 @@ static esp_err_t ota_start_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    cJSON *mode_json = cJSON_GetObjectItem(root, "mode");
-    if (!cJSON_IsNumber(mode_json) || mode_json->valueint < 0 || mode_json->valueint > 8) {
-        cJSON_Delete(root);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid or missing mode (0-8)");
-        return ESP_FAIL;
+    int mode = forced_mode;
+    if (mode < 0) {
+        cJSON *mode_json = cJSON_GetObjectItem(root, "mode");
+        if (!cJSON_IsNumber(mode_json) || mode_json->valueint < 0 || mode_json->valueint > 8) {
+            cJSON_Delete(root);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid or missing mode (0-8)");
+            return ESP_FAIL;
+        }
+        mode = mode_json->valueint;
     }
-    int mode = mode_json->valueint;
 
     char wifi_ssid[33] = "";
     char wifi_password[64] = "";
@@ -3708,14 +3896,28 @@ static esp_err_t ota_start_handler(httpd_req_t *req) {
         err = ota_github_start(&cfg);
     } else if (mode == 6) {
         ota_provision_config_t cfg = {0};
-        strncpy(cfg.wifi_ssid, wifi_ssid, sizeof(cfg.wifi_ssid) - 1);
-        strncpy(cfg.wifi_password, wifi_password, sizeof(cfg.wifi_password) - 1);
-        cJSON *pport = cJSON_GetObjectItem(root, "prov_sniff_port");
-        cJSON *ppost = cJSON_GetObjectItem(root, "prov_capture_post_only");
-        cJSON *pauto = cJSON_GetObjectItem(root, "prov_auto_parse_json");
-        cfg.sniff_port = cJSON_IsNumber(pport) ? (uint16_t)pport->valueint : 80;
-        cfg.capture_post_only = cJSON_IsBool(ppost) ? ppost->valueint : true;
-        cfg.auto_parse_json = cJSON_IsBool(pauto) ? pauto->valueint : true;
+        cJSON *channel = cJSON_GetObjectItem(root, "channel");
+        cJSON *ports = cJSON_GetObjectItem(root, "ports");
+        cJSON *max_bytes = cJSON_GetObjectItem(root, "max_pcap_bytes");
+        cfg.channel = cJSON_IsNumber(channel) ? (uint8_t)channel->valueint : 1;
+        cfg.max_pcap_bytes = cJSON_IsNumber(max_bytes)
+                                 ? (uint32_t)max_bytes->valuedouble
+                                 : OTA_PROV_DEFAULT_PCAP_BYTES;
+        if (cJSON_IsArray(ports)) {
+            int count = cJSON_GetArraySize(ports);
+            if (count > OTA_PROV_MAX_PORTS) count = OTA_PROV_MAX_PORTS;
+            for (int i = 0; i < count; i++) {
+                cJSON *port = cJSON_GetArrayItem(ports, i);
+                if (cJSON_IsNumber(port) && port->valueint > 0 &&
+                    port->valueint <= 65535) {
+                    cfg.ports[cfg.port_count++] = (uint16_t)port->valueint;
+                }
+            }
+        }
+        if (cfg.port_count == 0) {
+            cfg.ports[0] = 80;
+            cfg.port_count = 1;
+        }
         cfg.timeout_sec = timeout_sec;
         err = ota_provision_start(&cfg);
     } else if (mode == 7) {
@@ -3762,6 +3964,42 @@ static esp_err_t ota_start_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
     return send_success_response(req);
+}
+
+static esp_err_t ota_start_handler(httpd_req_t *req) {
+    return ota_start_with_mode(req, -1);
+}
+
+static esp_err_t ota_sniff_start_handler(httpd_req_t *req) {
+    return ota_start_with_mode(req, 0);
+}
+
+static esp_err_t ota_inject_start_handler(httpd_req_t *req) {
+    return ota_start_with_mode(req, 2);
+}
+
+static esp_err_t ota_fetch_start_handler(httpd_req_t *req) {
+    return ota_start_with_mode(req, 3);
+}
+
+static esp_err_t ota_poll_start_handler(httpd_req_t *req) {
+    return ota_start_with_mode(req, 4);
+}
+
+static esp_err_t ota_github_start_handler(httpd_req_t *req) {
+    return ota_start_with_mode(req, 5);
+}
+
+static esp_err_t ota_provision_start_handler(httpd_req_t *req) {
+    return ota_start_with_mode(req, 6);
+}
+
+static esp_err_t ota_rogue_broker_start_handler(httpd_req_t *req) {
+    return ota_start_with_mode(req, 7);
+}
+
+static esp_err_t ota_firmware_start_handler(httpd_req_t *req) {
+    return ota_start_with_mode(req, 8);
 }
 
 static esp_err_t ota_stop_handler(httpd_req_t *req) {
@@ -4247,13 +4485,39 @@ static esp_err_t ota_github_result_handler(httpd_req_t *req) {
 
 /* ── Provision Sniffer Handlers ─────────────────────────────────── */
 
-static esp_err_t ota_prov_creds_handler(httpd_req_t *req) {
+static esp_err_t ota_prov_status_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    cJSON *status = ota_provision_get_status_json();
+    if (status) cJSON_AddStringToObject(status, "mode", "PROVISION_CAPTURE");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return send_json_response(req, status);
+}
+
+static esp_err_t ota_prov_stop_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    esp_err_t err = ota_provision_stop();
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "Provision capture stop failed");
+        return ESP_FAIL;
+    }
+    return send_success_response(req);
+}
+
+static esp_err_t ota_prov_preview_handler(httpd_req_t *req) {
     if (!request_is_authenticated(req)) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
         return ESP_FAIL;
     }
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, ota_provision_get_creds_json());
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_sendstr(req, ota_provision_get_preview_json());
     return ESP_OK;
 }
 
@@ -4272,8 +4536,42 @@ static esp_err_t ota_prov_clear_handler(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
         return ESP_FAIL;
     }
-    ota_provision_clear_creds();
+    ota_provision_clear();
     return send_success_response(req);
+}
+
+static esp_err_t ota_prov_pcap_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    const uint8_t *pcap = NULL;
+    size_t pcap_size = 0;
+    esp_err_t err = ota_provision_get_pcap(&pcap, &pcap_size);
+    if (err == ESP_ERR_INVALID_STATE) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_sendstr(req, "Stop capture before downloading PCAP");
+        return ESP_FAIL;
+    }
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "No PCAP capture available");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/vnd.tcpdump.pcap");
+    httpd_resp_set_hdr(req, "Content-Disposition",
+                       "attachment; filename=\"provision-http.pcap\"");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    const size_t chunk_size = 4096;
+    for (size_t offset = 0; offset < pcap_size; offset += chunk_size) {
+        size_t length = pcap_size - offset;
+        if (length > chunk_size) length = chunk_size;
+        if (httpd_resp_send_chunk(req, (const char *)pcap + offset, length) != ESP_OK) {
+            httpd_resp_send_chunk(req, NULL, 0);
+            return ESP_FAIL;
+        }
+    }
+    return httpd_resp_send_chunk(req, NULL, 0);
 }
 
 /* ── Rogue Broker Handlers ──────────────────────────────────────── */
@@ -4490,6 +4788,7 @@ static esp_err_t status_api_handler(httpd_req_t *req) {
     cJSON_AddBoolToObject(response, "mesh_wormhole_running", mesh_wormhole_is_active());
     cJSON_AddBoolToObject(response, "mesh_l2_deauth_running", mesh_l2_deauth_is_active());
     cJSON_AddBoolToObject(response, "mesh_route_poison_running", mesh_route_poison_is_active());
+    cJSON_AddBoolToObject(response, "espnow_running", espnow_attack_is_active());
     if (attack_dos_is_running()) {
         cJSON_AddStringToObject(response, "dos", "DoS attack active");
         cJSON_AddStringToObject(response, "dos_method", attack_dos_get_method_str());
@@ -4559,7 +4858,7 @@ static esp_err_t status_api_handler(httpd_req_t *req) {
     return send_json_response(req, response);
 }
 
-static esp_err_t detector_api_handler(httpd_req_t *req) {
+static esp_err_t deauth_detect_status_handler(httpd_req_t *req) {
     if (!request_is_authenticated(req)) {
         httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
         return ESP_FAIL;
@@ -4639,6 +4938,7 @@ static esp_err_t stop_all_handler(httpd_req_t *req) {
     mesh_wormhole_stop();
     mesh_l2_deauth_stop();
     mesh_route_poison_stop();
+    espnow_attack_stop();
 
     return send_success_response(req);
 }
@@ -4703,13 +5003,14 @@ void start_web_server(void) {
         httpd_register_uri_handler(server, &stop);
         httpd_uri_t status = { .uri = "/api/status", .method = HTTP_GET, .handler = status_api_handler };
         httpd_register_uri_handler(server, &status);
-        httpd_uri_t detector = { .uri = "/api/detector", .method = HTTP_GET, .handler = detector_api_handler };
-        httpd_register_uri_handler(server, &detector);
+        /* Legacy alias — same handler as /api/deauth-detect/status */
+        httpd_uri_t deauth_detect_legacy = { .uri = "/api/detector", .method = HTTP_GET, .handler = deauth_detect_status_handler };
+        httpd_register_uri_handler(server, &deauth_detect_legacy);
         httpd_uri_t deauth_detect_start = { .uri = "/api/deauth-detect/start", .method = HTTP_POST, .handler = deauth_detect_start_handler };
         httpd_register_uri_handler(server, &deauth_detect_start);
         httpd_uri_t deauth_detect_stop = { .uri = "/api/deauth-detect/stop", .method = HTTP_POST, .handler = deauth_detect_stop_handler };
         httpd_register_uri_handler(server, &deauth_detect_stop);
-        httpd_uri_t deauth_detect_status = { .uri = "/api/deauth-detect/status", .method = HTTP_GET, .handler = detector_api_handler };
+        httpd_uri_t deauth_detect_status = { .uri = "/api/deauth-detect/status", .method = HTTP_GET, .handler = deauth_detect_status_handler };
         httpd_register_uri_handler(server, &deauth_detect_status);
         httpd_uri_t beacon_start = { .uri = "/api/beacon/start", .method = HTTP_POST, .handler = beacon_start_handler };
         httpd_register_uri_handler(server, &beacon_start);
@@ -4835,12 +5136,16 @@ void start_web_server(void) {
         httpd_register_uri_handler(server, &ble_spoof_start_uri);
         httpd_uri_t ble_spoof_stop_uri = { .uri = "/api/ble/spoof/stop", .method = HTTP_POST, .handler = ble_spoof_stop_handler };
         httpd_register_uri_handler(server, &ble_spoof_stop_uri);
+        httpd_uri_t ble_spoof_status_uri = { .uri = "/api/ble/spoof/status", .method = HTTP_GET, .handler = ble_spoof_status_handler };
+        httpd_register_uri_handler(server, &ble_spoof_status_uri);
         httpd_uri_t ble_spoof_clone_uri = { .uri = "/api/ble/spoof/clone", .method = HTTP_POST, .handler = ble_spoof_clone_handler };
         httpd_register_uri_handler(server, &ble_spoof_clone_uri);
         httpd_uri_t ble_connect_start_uri = { .uri = "/api/ble/connect/start", .method = HTTP_POST, .handler = ble_connect_start_handler };
         httpd_register_uri_handler(server, &ble_connect_start_uri);
         httpd_uri_t ble_connect_stop_uri = { .uri = "/api/ble/connect/stop", .method = HTTP_POST, .handler = ble_connect_stop_handler };
         httpd_register_uri_handler(server, &ble_connect_stop_uri);
+        httpd_uri_t ble_connect_status_uri = { .uri = "/api/ble/connect/status", .method = HTTP_GET, .handler = ble_connect_status_handler };
+        httpd_register_uri_handler(server, &ble_connect_status_uri);
         httpd_uri_t ble_l2cap_start_uri = { .uri = "/api/ble/l2cap/start", .method = HTTP_POST, .handler = ble_l2cap_start_handler };
         httpd_register_uri_handler(server, &ble_l2cap_start_uri);
         httpd_uri_t ble_l2cap_stop_uri = { .uri = "/api/ble/l2cap/stop", .method = HTTP_POST, .handler = ble_l2cap_stop_handler };
@@ -4851,6 +5156,8 @@ void start_web_server(void) {
         httpd_register_uri_handler(server, &ble_gatt_start_uri);
         httpd_uri_t ble_gatt_stop_uri = { .uri = "/api/ble/gatt/stop", .method = HTTP_POST, .handler = ble_gatt_stop_handler };
         httpd_register_uri_handler(server, &ble_gatt_stop_uri);
+        httpd_uri_t ble_gatt_status_uri = { .uri = "/api/ble/gatt/status", .method = HTTP_GET, .handler = ble_gatt_status_handler };
+        httpd_register_uri_handler(server, &ble_gatt_status_uri);
         httpd_uri_t ble_deauth_start_uri = { .uri = "/api/ble/deauth/start", .method = HTTP_POST, .handler = ble_deauth_start_handler };
         httpd_register_uri_handler(server, &ble_deauth_start_uri);
         httpd_uri_t ble_deauth_stop_uri = { .uri = "/api/ble/deauth/stop", .method = HTTP_POST, .handler = ble_deauth_stop_handler };
@@ -4966,26 +5273,33 @@ void start_web_server(void) {
         httpd_uri_t mesh_route_poison_stop_uri = {.uri = "/api/mesh/route-poison/stop", .method = HTTP_POST, .handler = mesh_route_poison_stop_handler};
         httpd_register_uri_handler(server, &mesh_route_poison_stop_uri);
 
+        httpd_uri_t espnow_start_uri = {.uri = "/api/mesh/espnow/start", .method = HTTP_POST, .handler = espnow_start_handler};
+        httpd_register_uri_handler(server, &espnow_start_uri);
+        httpd_uri_t espnow_status_uri = {.uri = "/api/mesh/espnow/status", .method = HTTP_GET, .handler = espnow_status_handler};
+        httpd_register_uri_handler(server, &espnow_status_uri);
+        httpd_uri_t espnow_stop_uri = {.uri = "/api/mesh/espnow/stop", .method = HTTP_POST, .handler = espnow_stop_handler};
+        httpd_register_uri_handler(server, &espnow_stop_uri);
+
         /* OTA Attack API (per-module + legacy /api/ota/start dispatcher) */
-        httpd_uri_t ota_sniff_start_uri = { .uri = "/api/ota/sniff/start", .method = HTTP_POST, .handler = ota_start_handler };
+        httpd_uri_t ota_sniff_start_uri = { .uri = "/api/ota/sniff/start", .method = HTTP_POST, .handler = ota_sniff_start_handler };
         httpd_register_uri_handler(server, &ota_sniff_start_uri);
         httpd_uri_t ota_sniff_stop_uri = { .uri = "/api/ota/sniff/stop", .method = HTTP_POST, .handler = ota_stop_handler };
         httpd_register_uri_handler(server, &ota_sniff_stop_uri);
         httpd_uri_t ota_sniff_status_uri = { .uri = "/api/ota/sniff/status", .method = HTTP_GET, .handler = ota_status_handler };
         httpd_register_uri_handler(server, &ota_sniff_status_uri);
-        httpd_uri_t ota_inject_start_uri = { .uri = "/api/ota/inject/start", .method = HTTP_POST, .handler = ota_start_handler };
+        httpd_uri_t ota_inject_start_uri = { .uri = "/api/ota/inject/start", .method = HTTP_POST, .handler = ota_inject_start_handler };
         httpd_register_uri_handler(server, &ota_inject_start_uri);
-        httpd_uri_t ota_fetch_start_uri = { .uri = "/api/ota/fetch/start", .method = HTTP_POST, .handler = ota_start_handler };
+        httpd_uri_t ota_fetch_start_uri = { .uri = "/api/ota/fetch/start", .method = HTTP_POST, .handler = ota_fetch_start_handler };
         httpd_register_uri_handler(server, &ota_fetch_start_uri);
-        httpd_uri_t ota_poll_start_uri = { .uri = "/api/ota/poll/start", .method = HTTP_POST, .handler = ota_start_handler };
+        httpd_uri_t ota_poll_start_uri = { .uri = "/api/ota/poll/start", .method = HTTP_POST, .handler = ota_poll_start_handler };
         httpd_register_uri_handler(server, &ota_poll_start_uri);
-        httpd_uri_t ota_prov_start_uri = { .uri = "/api/ota/prov/start", .method = HTTP_POST, .handler = ota_start_handler };
+        httpd_uri_t ota_prov_start_uri = { .uri = "/api/ota/prov/start", .method = HTTP_POST, .handler = ota_provision_start_handler };
         httpd_register_uri_handler(server, &ota_prov_start_uri);
-        httpd_uri_t ota_rb_start_uri = { .uri = "/api/ota/rogue-broker/start", .method = HTTP_POST, .handler = ota_start_handler };
+        httpd_uri_t ota_rb_start_uri = { .uri = "/api/ota/rogue-broker/start", .method = HTTP_POST, .handler = ota_rogue_broker_start_handler };
         httpd_register_uri_handler(server, &ota_rb_start_uri);
-        httpd_uri_t ota_fw_start_uri = { .uri = "/api/ota/firmware/start", .method = HTTP_POST, .handler = ota_start_handler };
+        httpd_uri_t ota_fw_start_uri = { .uri = "/api/ota/firmware/start", .method = HTTP_POST, .handler = ota_firmware_start_handler };
         httpd_register_uri_handler(server, &ota_fw_start_uri);
-        httpd_uri_t ota_gh_start_uri = { .uri = "/api/ota/github/start", .method = HTTP_POST, .handler = ota_start_handler };
+        httpd_uri_t ota_gh_start_uri = { .uri = "/api/ota/github/start", .method = HTTP_POST, .handler = ota_github_start_handler };
         httpd_register_uri_handler(server, &ota_gh_start_uri);
 
         httpd_uri_t ota_start_uri = { .uri = "/api/ota/start", .method = HTTP_POST, .handler = ota_start_handler };
@@ -5029,12 +5343,18 @@ void start_web_server(void) {
         httpd_register_uri_handler(server, &ota_chain_uri);
 
         /* OTA Provision Sniffer API */
-        httpd_uri_t ota_prov_creds_uri = { .uri = "/api/ota/prov/creds", .method = HTTP_GET, .handler = ota_prov_creds_handler };
-        httpd_register_uri_handler(server, &ota_prov_creds_uri);
+        httpd_uri_t ota_prov_status_uri = { .uri = "/api/ota/prov/status", .method = HTTP_GET, .handler = ota_prov_status_handler };
+        httpd_register_uri_handler(server, &ota_prov_status_uri);
+        httpd_uri_t ota_prov_stop_uri = { .uri = "/api/ota/prov/stop", .method = HTTP_POST, .handler = ota_prov_stop_handler };
+        httpd_register_uri_handler(server, &ota_prov_stop_uri);
+        httpd_uri_t ota_prov_preview_uri = { .uri = "/api/ota/prov/preview", .method = HTTP_GET, .handler = ota_prov_preview_handler };
+        httpd_register_uri_handler(server, &ota_prov_preview_uri);
         httpd_uri_t ota_prov_summary_uri = { .uri = "/api/ota/prov/summary", .method = HTTP_GET, .handler = ota_prov_summary_handler };
         httpd_register_uri_handler(server, &ota_prov_summary_uri);
         httpd_uri_t ota_prov_clear_uri = { .uri = "/api/ota/prov/clear", .method = HTTP_POST, .handler = ota_prov_clear_handler };
         httpd_register_uri_handler(server, &ota_prov_clear_uri);
+        httpd_uri_t ota_prov_pcap_uri = { .uri = "/api/ota/prov/pcap", .method = HTTP_GET, .handler = ota_prov_pcap_handler };
+        httpd_register_uri_handler(server, &ota_prov_pcap_uri);
 
         /* OTA Rogue Broker API */
         httpd_uri_t ota_mitm_msgs_uri = { .uri = "/api/ota/mitm/messages", .method = HTTP_GET, .handler = ota_mitm_messages_handler };

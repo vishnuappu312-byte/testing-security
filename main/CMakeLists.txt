@@ -61,6 +61,7 @@ idf_component_register(
         "mesh/mesh_wormhole.c"
         "mesh/mesh_l2_deauth.c"
         "mesh/mesh_route_poison.c"
+        "mesh/espnow_attack.c"
 
     INCLUDE_DIRS
         "."

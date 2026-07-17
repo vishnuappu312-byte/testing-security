@@ -2,7 +2,7 @@
 
 Full overview of the **testing-security** firmware: what it is, how it boots, features by domain, memory/PSRAM design, APIs, and limits.
 
-Related docs: [README.md](README.md) · [KNOWN_ISSUES.md](KNOWN_ISSUES.md) · [MEMORY.md](MEMORY.md)
+Related docs: [README.md](README.md) · [KNOWN_ISSUES.md](KNOWN_ISSUES.md) · [MEMORY.md](MEMORY.md) · [Android console](android-console/README.md)
 
 ---
 
@@ -163,6 +163,9 @@ Mutual exclusion: `ota_common_try_claim()` / `ota_common_release()` so only one 
 | Wormhole | Capture + tunnel / re-TX |
 | L2 deauth | Mesh link teardown |
 | Route poison | Path disruption modes |
+| ESP-NOW | Fixed-channel monitor / peer discovery / capture / raw replay / unencrypted inject / bounded flood (`espnow_attack`) |
+
+ESP-NOW claims exclusive promiscuous radio ownership, locks a user-selected channel (1–13), and may pause the management soft-AP for the duration of the run. Encrypted ESP-NOW payloads remain opaque without peer keys.
 
 ---
 
@@ -200,6 +203,7 @@ The dashboard, OTA JSON, firmware download (up to **512 KB**), AP scan table, be
 | BLE spam scan | Up to 50 scan entries |
 | BLE takeover | Services, characteristics, notif ring, JSON buffers (~6 KB + 4 KB) |
 | BLE GATT probe | Per-cycle service/char discovery tables |
+| ESP-NOW attack | Up to 48 stored frames (~256 B each) + peer/log rings |
 
 ### 5.5 OTA capture limits (by design, small fixed rings)
 
@@ -219,13 +223,13 @@ Registered in `webserver.c` (non-exhaustive):
 
 **Core:** `/`, `/login`, `/dashboard`, `/logout`, `/api/scan`, `/api/status`, `/api/stop`, `/api/stop/all`, `/api/mgmt-ap`
 
-**WiFi:** `/api/attack`, `/api/beacon/*`, `/api/dos/*`, `/api/handshake/*` (+ `/pcap`), `/api/pmkid/*`, `/api/probe/*`, `/api/eviltwin/*`, `/api/deauth-detect/*`
+**WiFi:** `/api/attack`, `/api/beacon/*`, `/api/dos/*`, `/api/handshake/*` (+ `/pcap`), `/api/pmkid/*`, `/api/probe/*`, `/api/eviltwin/*`, `/api/deauth-detect/*` (`/api/detector` remains a legacy status alias)
 
-**BLE:** `/api/ble/scan`, `/api/ble/status`, `/api/ble/spam|spoof|connect|l2cap|gatt|deauth|passkey|takeover/*`
+**BLE:** `/api/ble/scan`, `/api/ble/status`, `/api/ble/spam|spoof|connect|l2cap|gatt|deauth|passkey|takeover/*`. Spoof, connect flood, and GATT probe expose authenticated `/status` endpoints.
 
-**Mesh:** `/api/mesh/scan`, `/api/mesh/sniff`, `/api/mesh/remote-scan`, `/api/spoof/*`, `/api/mesh/inject|mitm|dos|eavesdrop|replay|wormhole|l2-deauth|route-poison/*` (as registered)
+**Mesh:** `/api/mesh/scan`, `/api/mesh/sniff`, `/api/mesh/remote-scan`, `/api/spoof/*`, `/api/mesh/inject|mitm|dos|eavesdrop|replay|wormhole|l2-deauth|route-poison|espnow/*` (as registered)
 
-**OTA:** `/api/ota/...` routes for start/stop/status, download, GitHub, inject, provision, analyze, etc.
+**OTA:** `/api/ota/...` routes for start/stop/status, download, GitHub, inject, provision, analyze, etc. Per-module start routes select their mode directly; legacy `/api/ota/start` still accepts a `mode` value.
 
 All JSON responses are intended for the embedded dashboard; many modules also expose `*_get_status_json()` helpers.
 
@@ -242,6 +246,8 @@ All JSON responses are intended for the embedded dashboard; many modules also ex
 | Probe vs sniffer | Probe can install its own promiscuous CB (can conflict with handshake/PMKID sniff) |
 | Concurrent WiFi attacks | Central wrapper blocks overlapping `RUNNING` state |
 | Concurrent BLE | Avoid overlapping GAP users |
+| ESP-NOW channel lock | Fixed channel 1–13; soft-AP may drop while module runs; encrypted ESP-NOW not decrypted |
+| ESP-NOW inject identity | Custom inject/flood uses tester STA MAC via `esp_now_send`; raw replay preserves captured frame fields |
 
 See **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)** for fixed vs still-open items.
 
@@ -266,7 +272,7 @@ Root `CMakeLists.txt` adds `-Wl,-zmuldefs` for raw 802.11 TX override.
 | WiFi attack / support | ~15 source files under `wifi/` + wrappers | Sniffer + serializers included |
 | BLE | 10 modules + `ble_common` | NimBLE |
 | OTA | 8 modes + `ota_common` | Claim-based runners |
-| Mesh | 10+ modules | Scan + attacks |
+| Mesh | 11+ modules | Scan + attacks + ESP-NOW |
 | Web | 1 large server + UI header | Dozens of `/api` routes |
 | Utils | PSRAM + helpers | Boot-critical for memory |
 
@@ -280,8 +286,9 @@ Root `CMakeLists.txt` adds `-Wl,-zmuldefs` for raw 802.11 TX override.
 4. `main/main.c` — what initializes at boot  
 5. `main/webserver.c` — API entry points  
 6. Domain folders (`wifi/`, `bt/`, `ota/`, `mesh/`) — implementation  
-7. `KNOWN_ISSUES.md` — known gaps before relying on a feature  
+7. `KNOWN_ISSUES.md` — known gaps before relying on a feature
+8. `android-console/README.md` — optional Android dashboard wrapper
 
 ---
 
-*Generated from the current tree (2026-07-16). Update this file when modules or memory policy change.*
+*Generated from the current tree (2026-07-17). Update this file when modules or memory policy change.*

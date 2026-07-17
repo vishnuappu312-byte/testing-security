@@ -45,6 +45,7 @@
 #include "mesh_wormhole.h"
 #include "mesh_l2_deauth.h"
 #include "mesh_route_poison.h"
+#include "espnow_attack.h"
 #include "ota_common.h"
 #include "ota_mqtt_sniff.h"
 #include "ota_inject.h"
@@ -127,6 +128,7 @@ void app_main(void) {
     mesh_wormhole_init();
     mesh_l2_deauth_init();
     mesh_route_poison_init();
+    espnow_attack_init();
 
     /* ---- Web server (serves dashboard + all API endpoints) ---- */
     start_web_server();
@@ -179,6 +181,7 @@ void app_main(void) {
     ESP_LOGI(TAG, "  Wormhole (capture + tunnel/re-TX)");
     ESP_LOGI(TAG, "  L2 Deauth (mesh link teardown)");
     ESP_LOGI(TAG, "  Route Poison (mesh path disruption)");
+    ESP_LOGI(TAG, "  ESP-NOW (monitor / replay / inject / flood)");
     ESP_LOGI(TAG, "=========================================");
     ESP_LOGI(TAG, "Connect to WiFi AP: %s", ssid);
     ESP_LOGI(TAG, "Open browser: http://192.168.4.1");
