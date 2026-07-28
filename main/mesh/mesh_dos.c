@@ -322,6 +322,10 @@ static void tx_burst(mesh_dos_method_t method, uint32_t combine_tick)
             s_state.packets_sent++;
         } else {
             s_state.packets_failed++;
+            vTaskDelay(pdMS_TO_TICKS(2));
+        }
+        if (b + 1 < burst && s_running) {
+            vTaskDelay(pdMS_TO_TICKS(1));
         }
     }
 

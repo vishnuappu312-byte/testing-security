@@ -156,6 +156,17 @@ typedef struct {
 
 void attack_eviltwin_get_status(eviltwin_status_t *out);
 
+/**
+ * Install custom captive-portal HTML (e.g. synthetic page from provision capture).
+ * Copies the strings into internal buffers. Pass NULL for wrong_html to synthesize
+ * a simple error variant from index_html is not supported — both may be set.
+ * Cleared on stop unless keep_on_stop is used via clear API.
+ */
+esp_err_t attack_eviltwin_set_portal_html(const char *index_html,
+                                          const char *wrong_html);
+void attack_eviltwin_clear_portal_html(void);
+bool attack_eviltwin_has_custom_portal(void);
+
 #ifdef __cplusplus
 }
 #endif

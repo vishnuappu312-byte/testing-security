@@ -15,8 +15,17 @@
 #include "esp_err.h"
 #include "esp_wifi.h"
 #include "esp_wifi_types.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "wsl_bypasser";
+
+/* esp_wifi_80211_tx returns ESP_ERR_NO_MEM when the Wi-Fi TX buffer
+ * pool is full (CONFIG_ESP32_WIFI_STATIC_TX_BUFFER_NUM). Flooding
+ * ESP_LOGE on every failure burns CPU and makes recovery worse. */
+static int64_t s_last_tx_err_log_us = 0;
+static uint32_t s_tx_err_suppressed = 0;
 
 /*
  * Override ESP-IDF libnet80211 sanity check so deauth/disassoc frames
@@ -47,15 +56,45 @@ static const uint8_t deauth_frame_default[] = {
 
 bool wsl_bypasser_send_raw_frame(const uint8_t *frame_buffer, int size)
 {
-    esp_err_t err = esp_wifi_80211_tx(WIFI_IF_STA, frame_buffer, size, false);
-    if (err != ESP_OK) {
-        err = esp_wifi_80211_tx(WIFI_IF_AP, frame_buffer, size, false);
-    }
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Raw frame TX failed! Error: %s", esp_err_to_name(err));
+    if (frame_buffer == NULL || size <= 0) {
         return false;
     }
-    return true;
+
+    esp_err_t err = ESP_FAIL;
+    /* STA and AP share the same TX buffer pool — retry with backoff on
+     * NO_MEM instead of immediately hammering the other interface. */
+    for (int attempt = 0; attempt < 4; attempt++) {
+        err = esp_wifi_80211_tx(WIFI_IF_STA, frame_buffer, size, false);
+        if (err == ESP_OK) {
+            return true;
+        }
+        if (err != ESP_ERR_NO_MEM) {
+            err = esp_wifi_80211_tx(WIFI_IF_AP, frame_buffer, size, false);
+            if (err == ESP_OK) {
+                return true;
+            }
+            if (err != ESP_ERR_NO_MEM) {
+                break;
+            }
+        }
+        /* Let the driver drain queued frames before retrying */
+        vTaskDelay(pdMS_TO_TICKS(1 + attempt));
+    }
+
+    int64_t now = esp_timer_get_time();
+    if (now - s_last_tx_err_log_us >= 1000000LL) {
+        if (s_tx_err_suppressed > 0) {
+            ESP_LOGW(TAG, "Raw frame TX failed (%s); suppressed %lu similar errors",
+                     esp_err_to_name(err), (unsigned long)s_tx_err_suppressed);
+        } else {
+            ESP_LOGE(TAG, "Raw frame TX failed! Error: %s", esp_err_to_name(err));
+        }
+        s_last_tx_err_log_us = now;
+        s_tx_err_suppressed = 0;
+    } else {
+        s_tx_err_suppressed++;
+    }
+    return false;
 }
 
 void wsl_bypasser_send_deauth_frame(const wifi_ap_record_t *ap_record){

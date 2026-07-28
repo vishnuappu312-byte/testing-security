@@ -198,6 +198,7 @@ static void tx_one(const uint8_t *dest, const uint8_t *src, const uint8_t *bssid
         }
     } else {
         s_state.packets_failed++;
+        vTaskDelay(pdMS_TO_TICKS(2));
     }
 }
 
@@ -249,6 +250,9 @@ static void tx_burst(uint32_t tick)
 
             default:
                 break;
+        }
+        if (b + 1 < burst && s_running) {
+            vTaskDelay(pdMS_TO_TICKS(1));
         }
     }
 }
